@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#1e1e1e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Mobile Copilot">
+  <title>Mobile Copilot</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Connection Screen -->
+    <div id="connect-screen" class="screen active">
+      <div class="connect-container">
+        <div class="logo">
+          <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+            <rect width="64" height="64" rx="16" fill="#0078d4"/>
+            <path d="M20 18h24v4H24v8h16v4H24v8h20v4H20V18z" fill="white"/>
+            <circle cx="48" cy="48" r="12" fill="#1e1e1e" stroke="#0078d4" stroke-width="2"/>
+            <path d="M44 48h8M48 44v8" stroke="#0078d4" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h1>Mobile Copilot</h1>
+        <p class="subtitle">Connect to your VS Code instance</p>
+        <div id="connect-status" class="connect-status">Connecting...</div>
+        <button id="reconnect-btn" class="btn btn-primary" style="display:none">Reconnect</button>
+      </div>
+    </div>
+
+    <!-- Main App Screen -->
+    <div id="main-screen" class="screen">
+      <!-- Top Bar -->
+      <header class="top-bar">
+        <button id="nav-toggle" class="icon-btn" aria-label="Menu">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+            <rect x="2" y="4" width="16" height="2" rx="1"/>
+            <rect x="2" y="9" width="16" height="2" rx="1"/>
+            <rect x="2" y="14" width="16" height="2" rx="1"/>
+          </svg>
+        </button>
+        <div class="top-bar-title">
+          <span id="workspace-name">Workspace</span>
+          <span id="connection-indicator" class="indicator online" title="Connected"></span>
+        </div>
+        <button id="new-chat-btn" class="icon-btn" aria-label="New Chat">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"/>
+          </svg>
+        </button>
+      </header>
+
+      <!-- Navigation Drawer -->
+      <nav id="nav-drawer" class="nav-drawer">
+        <div class="nav-overlay" id="nav-overlay"></div>
+        <div class="nav-content">
+          <div class="nav-header">
+            <span class="nav-title">Mobile Copilot</span>
+            <span class="nav-version">v0.1.0</span>
+          </div>
+          <ul class="nav-list">
+            <li class="nav-item active" data-panel="chat">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><path d="M2 2h14a1 1 0 011 1v9a1 1 0 01-1 1H5l-3 3V3a1 1 0 011-1z"/></svg>
+              Chat
+            </li>
+            <li class="nav-item" data-panel="files">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><path d="M2 3a1 1 0 011-1h4l2 2h6a1 1 0 011 1v9a1 1 0 01-1 1H3a1 1 0 01-1-1V3z"/></svg>
+              Files
+            </li>
+            <li class="nav-item" data-panel="terminal">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><path d="M2 3a1 1 0 011-1h12a1 1 0 011 1v12a1 1 0 01-1 1H3a1 1 0 01-1-1V3zm3 3l3 3-3 3m4 0h4"/></svg>
+              Terminal
+            </li>
+            <li class="nav-item" data-panel="diagnostics">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><path d="M9 1a8 8 0 100 16A8 8 0 009 1zm0 4a1 1 0 011 1v4a1 1 0 11-2 0V6a1 1 0 011-1zm0 8a1 1 0 100-2 1 1 0 000 2z"/></svg>
+              Diagnostics
+              <span id="diag-badge" class="badge" style="display:none">0</span>
+            </li>
+            <li class="nav-item" data-panel="settings">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><path d="M9 11a2 2 0 100-4 2 2 0 000 4zm6.32-2.9l1.13.65a.5.5 0 01.18.68l-1 1.73a.5.5 0 01-.68.18l-1.13-.65a5.5 5.5 0 01-1.12.65v1.3a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-1.3a5.5 5.5 0 01-1.12-.65l-1.13.65a.5.5 0 01-.68-.18l-1-1.73a.5.5 0 01.18-.68l1.13-.65a5.5 5.5 0 010-1.3l-1.13-.65a.5.5 0 01-.18-.68l1-1.73a.5.5 0 01.68-.18l1.13.65a5.5 5.5 0 011.12-.65v-1.3a.5.5 0 01.5-.5h2a.5.5 0 01.5.5v1.3c.4.16.78.38 1.12.65l1.13-.65a.5.5 0 01.68.18l1 1.73a.5.5 0 01-.18.68l-1.13.65a5.5 5.5 0 010 1.3z"/></svg>
+              Settings
+            </li>
+          </ul>
+        </div>
+      </nav>
+
+      <!-- Panels -->
+      <main class="panels">
+        <!-- Chat Panel -->
+        <div id="panel-chat" class="panel active">
+          <div id="chat-messages" class="chat-messages">
+            <div class="welcome-message">
+              <h2>👋 Welcome to Mobile Copilot</h2>
+              <p>You're connected to your VS Code workspace. Ask me anything about your code, request changes, or run commands.</p>
+              <div class="quick-actions">
+                <button class="quick-action" data-prompt="What files are in this workspace?">📁 Explore workspace</button>
+                <button class="quick-action" data-prompt="Are there any errors or warnings in the code?">🔍 Check diagnostics</button>
+                <button class="quick-action" data-prompt="Summarize the current project and its structure">📋 Project overview</button>
+                <button class="quick-action" data-prompt="What's the git status?">🔀 Git status</button>
+              </div>
+            </div>
+          </div>
+          <div class="chat-input-container">
+            <div class="mode-toggle-bar">
+              <button class="mode-btn active" data-mode="agent" id="mode-agent-btn" title="Full Copilot Chat agent — edits files, runs commands, uses tools">
+                <span class="mode-icon">🤖</span> Agent
+              </button>
+              <button class="mode-btn" data-mode="chat" id="mode-chat-btn" title="Raw LLM chat — quick answers, no tools">
+                <span class="mode-icon">💬</span> Chat
+              </button>
+            </div>
+            <div class="chat-input-row">
+              <button id="attach-btn" class="icon-btn" aria-label="Attach context" title="Attach file context">
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><path d="M14.5 9.5l-5.5 5.5a3.5 3.5 0 01-5-5l6.5-6.5a2 2 0 013 3L7 13a.5.5 0 01-.7-.7l5.5-5.5"/></svg>
+              </button>
+              <textarea id="chat-input" placeholder="Ask Copilot anything..." rows="1" autofocus></textarea>
+              <button id="send-btn" class="icon-btn send-btn" aria-label="Send" disabled>
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M3.5 2.5l14 7.5-14 7.5v-6l8-1.5-8-1.5v-6z"/></svg>
+              </button>
+            </div>
+            <div id="context-bar" class="context-bar" style="display:none">
+              <div id="context-items" class="context-items"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Files Panel -->
+        <div id="panel-files" class="panel">
+          <div class="panel-header">
+            <h3>Files</h3>
+            <button id="refresh-files-btn" class="icon-btn" aria-label="Refresh">↻</button>
+          </div>
+          <div id="file-tree" class="file-tree">
+            <div class="loading">Loading files...</div>
+          </div>
+          <div id="file-viewer" class="file-viewer" style="display:none">
+            <div class="file-viewer-header">
+              <button id="close-viewer-btn" class="icon-btn">←</button>
+              <span id="viewer-filename"></span>
+            </div>
+            <pre id="viewer-content" class="viewer-content"><code></code></pre>
+          </div>
+        </div>
+
+        <!-- Terminal Panel -->
+        <div id="panel-terminal" class="panel">
+          <div class="panel-header">
+            <h3>Terminal</h3>
+          </div>
+          <div id="terminal-output" class="terminal-output"></div>
+          <div class="terminal-input-container">
+            <span class="terminal-prompt">$</span>
+            <input id="terminal-input" type="text" placeholder="Enter command..." class="terminal-input" />
+            <button id="terminal-send-btn" class="icon-btn">▶</button>
+          </div>
+        </div>
+
+        <!-- Diagnostics Panel -->
+        <div id="panel-diagnostics" class="panel">
+          <div class="panel-header">
+            <h3>Diagnostics</h3>
+            <div id="diag-summary" class="diag-summary"></div>
+          </div>
+          <div id="diagnostics-list" class="diagnostics-list">
+            <div class="empty-state">No diagnostics</div>
+          </div>
+        </div>
+
+        <!-- Settings Panel -->
+        <div id="panel-settings" class="panel">
+          <div class="panel-header">
+            <h3>Settings</h3>
+          </div>
+          <div class="settings-content">
+            <div class="setting-group">
+              <label class="setting-label">Chat Mode</label>
+              <div class="setting-description">
+                <strong>Agent</strong>: Sends your prompt to the real Copilot Chat in VS Code. Full agent capabilities — edits files, runs commands, uses tools. You'll see a live activity feed of what the agent is doing.<br><br>
+                <strong>Chat</strong>: Direct LLM conversation via vscode.lm API. Quick answers only, no file changes or tools.
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Theme</label>
+              <select id="theme-select" class="setting-control">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+              </select>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Model</label>
+              <select id="model-select" class="setting-control">
+                <optgroup label="GPT">
+                  <option value="gpt-4o">GPT-4o</option>
+                  <option value="gpt-4o-mini">GPT-4o Mini</option>
+                  <option value="gpt-4.1">GPT-4.1</option>
+                  <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+                  <option value="gpt-4.1-nano">GPT-4.1 Nano</option>
+                </optgroup>
+                <optgroup label="Claude">
+                  <option value="claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+                  <option value="claude-3.7-sonnet">Claude 3.7 Sonnet</option>
+                  <option value="claude-3.7-sonnet-thought">Claude 3.7 Sonnet (Thinking)</option>
+                  <option value="claude-4-sonnet">Claude 4 Sonnet</option>
+                  <option value="claude-4-sonnet-thought">Claude 4 Sonnet (Thinking)</option>
+                  <option value="claude-4-opus">Claude 4 Opus</option>
+                  <option value="claude-4-opus-thought">Claude 4 Opus (Thinking)</option>
+                </optgroup>
+                <optgroup label="o-series">
+                  <option value="o1">o1</option>
+                  <option value="o1-mini">o1 Mini</option>
+                  <option value="o3">o3</option>
+                  <option value="o3-mini">o3 Mini</option>
+                  <option value="o4-mini">o4 Mini</option>
+                </optgroup>
+                <optgroup label="Gemini">
+                  <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                  <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                </optgroup>
+              </select>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Server Info</label>
+              <div id="server-info" class="setting-info">Not connected</div>
+            </div>
+            <div class="setting-group">
+              <button id="disconnect-btn" class="btn btn-danger">Disconnect</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Markdown rendering (lightweight) -->
+  <script src="/lib/marked.min.js"></script>
+  <script src="/lib/highlight.min.js"></script>
+  <link rel="stylesheet" href="/lib/highlight-dark.css">
+
+  <script src="/app.js"></script>
+</body>
+</html>

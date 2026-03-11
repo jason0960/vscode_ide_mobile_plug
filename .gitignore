@@ -1,0 +1,6 @@
+.vscode-test/
+dist/
+node_modules/
+*.vsix
+mobile-client/node_modules/
+.copilot-mobile-relay.md

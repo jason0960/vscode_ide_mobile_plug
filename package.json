@@ -1,0 +1,133 @@
+{
+  "name": "mobile-copilot",
+  "displayName": "Mobile Copilot Remote",
+  "description": "Control VS Code Copilot Chat from your mobile device — full agent mode with file ops, terminal, diagnostics, and streaming chat.",
+  "version": "0.1.0",
+  "publisher": "jason0960",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "copilot",
+    "mobile",
+    "remote",
+    "chat",
+    "agent"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "mobile-copilot.relay",
+        "fullName": "Mobile Copilot",
+        "name": "mobile",
+        "description": "Relay prompts from your mobile device to Copilot — responses stream back to your phone.",
+        "isSticky": true
+      }
+    ],
+    "commands": [
+      {
+        "command": "mobile-copilot.start",
+        "title": "Mobile Copilot: Start Server"
+      },
+      {
+        "command": "mobile-copilot.stop",
+        "title": "Mobile Copilot: Stop Server"
+      },
+      {
+        "command": "mobile-copilot.showQR",
+        "title": "Mobile Copilot: Show QR Code"
+      },
+      {
+        "command": "mobile-copilot.toggleTunnel",
+        "title": "Mobile Copilot: Toggle Tunnel"
+      }
+    ],
+    "configuration": {
+      "title": "Mobile Copilot",
+      "properties": {
+        "mobileCopilot.port": {
+          "type": "number",
+          "default": 3847,
+          "description": "Port for the mobile server."
+        },
+        "mobileCopilot.tunnelProvider": {
+          "type": "string",
+          "enum": [
+            "none",
+            "vscode",
+            "cloudflare",
+            "ngrok"
+          ],
+          "default": "none",
+          "description": "Tunnel provider for internet access."
+        },
+        "mobileCopilot.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start the mobile server when VS Code launches."
+        },
+        "mobileCopilot.sessionTimeout": {
+          "type": "number",
+          "default": 3600,
+          "description": "Session timeout in seconds (0 = no timeout)."
+        },
+        "mobileCopilot.modelFamily": {
+          "type": "string",
+          "enum": [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "claude-3.5-sonnet",
+            "claude-3.7-sonnet",
+            "claude-3.7-sonnet-thought",
+            "claude-4-sonnet",
+            "claude-4-sonnet-thought",
+            "claude-4-opus",
+            "claude-4-opus-thought",
+            "o1",
+            "o1-mini",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash"
+          ],
+          "default": "gpt-4o",
+          "description": "Preferred Copilot model family."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "lint": "eslint src/",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.95.0",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.56.0",
+    "jest": "^29.7.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "nanoid": "^3.3.7",
+    "qrcode": "^1.5.3",
+    "ws": "^8.16.0"
+  }
+}
