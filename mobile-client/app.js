@@ -60,6 +60,13 @@
     diagnosticsList: $('#diagnostics-list'),
     diagSummary: $('#diag-summary'),
     diagBadge: $('#diag-badge'),
+    changesList: $('#changes-list'),
+    changesSummary: $('#changes-summary'),
+    changesActions: $('#changes-actions'),
+    changesBadge: $('#changes-badge'),
+    refreshChangesBtn: $('#refresh-changes-btn'),
+    acceptAllBtn: $('#accept-all-btn'),
+    revertAllBtn: $('#revert-all-btn'),
     themeSelect: $('#theme-select'),
     modelSelect: $('#model-select'),
     serverInfo: $('#server-info'),
@@ -1162,6 +1169,111 @@
     dom.terminalOutput.scrollTop = dom.terminalOutput.scrollHeight;
   }
 
+  // ─── Changes Panel ────────────────────────────────────
+
+  let _changesData = null; // cache last loaded changes data
+
+  async function loadChanges() {
+    dom.changesList.innerHTML = '<div class="loading">Scanning changes...</div>';
+    dom.changesSummary.innerHTML = '';
+    dom.changesActions.style.display = 'none';
+
+    try {
+      const result = await rpcRequest('git.changedFiles', {});
+      _changesData = result;
+
+      const { files, summary } = result;
+
+      // Update badge in nav
+      const totalFiles = files.length;
+      if (dom.changesBadge) {
+        if (totalFiles > 0) {
+          dom.changesBadge.textContent = totalFiles;
+          dom.changesBadge.style.display = '';
+        } else {
+          dom.changesBadge.style.display = 'none';
+        }
+      }
+
+      if (totalFiles === 0) {
+        dom.changesList.innerHTML = '<div class="empty-state">Working tree clean — no uncommitted changes</div>';
+        dom.changesSummary.innerHTML = '<span class="changes-clean">✓ Clean</span>';
+        return;
+      }
+
+      // Summary bar
+      const parts = [];
+      if (summary.modified > 0) parts.push(`<span class="changes-stat">${summary.modified} modified</span>`);
+      if (summary.added > 0) parts.push(`<span class="changes-stat changes-stat-added">${summary.added} added</span>`);
+      if (summary.deleted > 0) parts.push(`<span class="changes-stat changes-stat-deleted">${summary.deleted} deleted</span>`);
+      parts.push(`<span class="changes-stat-total"><span class="diff-added">+${summary.totalAdded}</span> <span class="diff-removed">-${summary.totalRemoved}</span></span>`);
+      dom.changesSummary.innerHTML = parts.join(' ');
+
+      // Show actions
+      dom.changesActions.style.display = '';
+
+      // Render file list
+      dom.changesList.innerHTML = '';
+      for (const file of files) {
+        const fileEl = document.createElement('div');
+        fileEl.className = 'changes-file';
+
+        const statusIcon = file.status === 'added' ? 'A' : file.status === 'deleted' ? 'D' : 'M';
+        const statusClass = 'changes-file-status status-' + file.status;
+
+        // Count per-file +/-
+        let addedLines = 0, removedLines = 0;
+        if (file.diff) {
+          const dLines = file.diff.split('\\n');
+          addedLines = dLines.filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+          removedLines = dLines.filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+        }
+
+        const diffId = 'cdiff-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+
+        let html = `<div class="changes-file-header" onclick="document.getElementById('${diffId}').classList.toggle('expanded'); this.querySelector('.changes-file-arrow').classList.toggle('open')">`;
+        html += `<span class="changes-file-arrow">▸</span>`;
+        html += `<span class="${statusClass}">${statusIcon}</span>`;
+        html += `<span class="changes-file-name">${escapeHtml(file.path)}</span>`;
+        html += `<span class="diff-stats"><span class="diff-added">+${addedLines}</span> <span class="diff-removed">-${removedLines}</span></span>`;
+        html += `</div>`;
+
+        // File actions row
+        html += `<div id="${diffId}" class="changes-file-body">`;
+        html += `<div class="changes-file-actions">`;
+        html += `<button class="changes-action-btn" onclick="window.__openFile('${escapeHtml(file.path)}')">Open File</button>`;
+        html += `<button class="changes-action-btn changes-action-revert" onclick="window.__revertSingleFile('${escapeHtml(file.path)}', this)">Revert</button>`;
+        html += `</div>`;
+        if (file.diff) {
+          html += renderUnifiedDiff(file.diff);
+        } else {
+          html += `<div class="empty-state">No diff available</div>`;
+        }
+        html += `</div>`;
+
+        fileEl.innerHTML = html;
+        dom.changesList.appendChild(fileEl);
+      }
+
+    } catch (err) {
+      dom.changesList.innerHTML = `<div class="empty-state">Failed to load changes: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+
+  // Revert a single file from Changes panel
+  window.__revertSingleFile = async function (filePath, btnEl) {
+    if (!confirm(`Revert all changes to ${filePath}?`)) return;
+    try {
+      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Reverting...'; }
+      await rpcRequest('git.restoreFiles', { files: [filePath] });
+      // Reload changes panel
+      loadChanges();
+    } catch (err) {
+      alert('Revert failed: ' + (err.message || err));
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Revert'; }
+    }
+  };
+
   // ─── Quick Commands Panel ─────────────────────────────
 
   async function runQuickCommand(command, needsInput, inputPrompt) {
@@ -1383,6 +1495,9 @@
       case 'diagnostics':
         loadDiagnostics();
         break;
+      case 'changes':
+        loadChanges();
+        break;
     }
 
     closeDrawer();
@@ -1563,6 +1678,32 @@
     });
 
     dom.refreshFilesBtn.addEventListener('click', () => loadFileTree());
+
+    // Changes panel
+    dom.refreshChangesBtn.addEventListener('click', () => loadChanges());
+
+    dom.acceptAllBtn.addEventListener('click', () => {
+      dom.changesActions.style.display = 'none';
+      dom.changesSummary.innerHTML = '<span class="changes-clean">✓ Changes accepted</span>';
+      dom.changesList.innerHTML = '<div class="empty-state">Changes accepted</div>';
+      if (dom.changesBadge) dom.changesBadge.style.display = 'none';
+    });
+
+    dom.revertAllBtn.addEventListener('click', async () => {
+      if (!_changesData || !_changesData.files.length) return;
+      if (!confirm(`Revert ALL ${_changesData.files.length} changed files?`)) return;
+      try {
+        dom.revertAllBtn.disabled = true;
+        dom.revertAllBtn.textContent = 'Reverting...';
+        const allPaths = _changesData.files.map(f => f.path);
+        await rpcRequest('git.restoreFiles', { files: allPaths });
+        loadChanges();
+      } catch (err) {
+        alert('Revert failed: ' + (err.message || err));
+        dom.revertAllBtn.disabled = false;
+        dom.revertAllBtn.textContent = 'Revert All';
+      }
+    });
 
     // Attach context
     dom.attachBtn.addEventListener('click', async () => {

@@ -566,6 +566,43 @@ export class MobileCopilotServer {
       return this.agent.gitDiff();
     });
 
+    // Return all uncommitted changes with per-file unified diffs
+    this.rpc.onRequest('git.changedFiles', async () => {
+      return this.getWorkingTreeDiffs();
+    });
+
+    // Revert specific files (or all uncommitted changes)
+    this.rpc.onRequest('git.restoreFiles', async (params) => {
+      const files = params?.files as string[];
+      if (!files || files.length === 0) {
+        return { restored: 0, message: 'No files specified' };
+      }
+      const wsFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!wsFolder) throw new Error('No workspace folder open');
+
+      const { execSync } = require('child_process');
+      const results: string[] = [];
+      for (const filePath of files) {
+        try {
+          // Check if it's an untracked file (needs rm, not restore)
+          const status = execSync(`git status --porcelain -- "${filePath}"`, {
+            cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
+          }).trim();
+          if (status.startsWith('??')) {
+            execSync(`rm -f "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+          } else {
+            execSync(`git restore "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+            // Also unstage if staged
+            try { execSync(`git restore --staged "${filePath}"`, { cwd: wsFolder.uri.fsPath }); } catch { /* ignore */ }
+          }
+          results.push(filePath);
+        } catch (err: any) {
+          this.outputChannel.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
+        }
+      }
+      return { restored: results.length, files: results };
+    });
+
     // Revert agent changes — restores files modified during last agent run
     this.rpc.onRequest('git.restoreChanges', async (params) => {
       const files = params?.files as string[] | undefined;
@@ -1297,6 +1334,113 @@ export class MobileCopilotServer {
     }
 
     return results;
+  }
+
+  /**
+   * Get all uncommitted working tree changes with per-file unified diffs.
+   * Unlike computeFileDiffs() which only covers agent-modified files,
+   * this scans the entire working tree via git status.
+   */
+  private async getWorkingTreeDiffs(): Promise<{
+    files: Array<{ path: string; status: string; diff: string }>;
+    summary: { modified: number; added: number; deleted: number; totalAdded: number; totalRemoved: number };
+  }> {
+    const wsFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!wsFolder) return { files: [], summary: { modified: 0, added: 0, deleted: 0, totalAdded: 0, totalRemoved: 0 } };
+
+    const { execSync } = require('child_process');
+    let statusOutput = '';
+    try {
+      statusOutput = execSync('git status --porcelain', {
+        cwd: wsFolder.uri.fsPath,
+        encoding: 'utf-8',
+        maxBuffer: 1024 * 256,
+      }).trim();
+    } catch {
+      return { files: [], summary: { modified: 0, added: 0, deleted: 0, totalAdded: 0, totalRemoved: 0 } };
+    }
+
+    if (!statusOutput) {
+      return { files: [], summary: { modified: 0, added: 0, deleted: 0, totalAdded: 0, totalRemoved: 0 } };
+    }
+
+    const statusLines = statusOutput.split('\n').filter(Boolean);
+    const files: Array<{ path: string; status: string; diff: string }> = [];
+    let totalAdded = 0, totalRemoved = 0;
+    let modifiedCount = 0, addedCount = 0, deletedCount = 0;
+
+    for (const line of statusLines) {
+      const statusCode = line.substring(0, 2).trim();
+      const filePath = line.substring(3).trim();
+
+      // Classify status
+      let status = 'modified';
+      if (statusCode === '??' || statusCode === 'A') { status = 'added'; addedCount++; }
+      else if (statusCode === 'D') { status = 'deleted'; deletedCount++; }
+      else { modifiedCount++; }
+
+      // Get diff for this file
+      let diff = '';
+      try {
+        if (status === 'added') {
+          // Untracked or newly added — show full content as added
+          try {
+            const content = execSync(`cat "${filePath}"`, {
+              cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
+            });
+            const lines = content.split('\n');
+            diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n` +
+              lines.map((l: string) => '+' + l).join('\n');
+          } catch { /* ignore */ }
+        } else if (status === 'deleted') {
+          try {
+            diff = execSync(`git diff --no-color -- "${filePath}"`, {
+              cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
+            }).trim();
+          } catch { /* ignore */ }
+          if (!diff) {
+            try {
+              diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+                cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
+              }).trim();
+            } catch { /* ignore */ }
+          }
+        } else {
+          // Modified — try unstaged then staged
+          try {
+            diff = execSync(`git diff --no-color -- "${filePath}"`, {
+              cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
+            }).trim();
+          } catch { /* ignore */ }
+          if (!diff) {
+            try {
+              diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+                cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
+              }).trim();
+            } catch { /* ignore */ }
+          }
+        }
+
+        // Count +/- lines
+        if (diff) {
+          const dLines = diff.split('\n');
+          totalAdded += dLines.filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+          totalRemoved += dLines.filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+        }
+
+        // Truncate very large diffs
+        if (diff && diff.length > 15000) {
+          diff = diff.substring(0, 15000) + '\n... (truncated, diff too large)';
+        }
+      } catch { /* ignore */ }
+
+      files.push({ path: filePath, status, diff });
+    }
+
+    return {
+      files,
+      summary: { modified: modifiedCount, added: addedCount, deleted: deletedCount, totalAdded, totalRemoved },
+    };
   }
 
   /**

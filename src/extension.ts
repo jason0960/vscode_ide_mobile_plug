@@ -1,13 +1,3 @@
-/**
- * Main entry point for the Mobile Copilot Remote extension.
- *
- * VS Code calls activate() when the extension loads (configured via
- * "activationEvents": ["onStartupFinished"] in package.json).
- * This file registers all commands and initializes the server.
- *
- * Entry: package.json → "main": "./dist/extension.js" → this file
- */
-
 import * as vscode from 'vscode';
 import { MobileCopilotServer } from './server';
 import { registerChatParticipant } from './participant';
