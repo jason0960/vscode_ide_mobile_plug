@@ -881,15 +881,21 @@
       case 'completed': {
         const fileCount = modifiedFiles?.length || 0;
         banner.className = 'agent-status-banner completed';
-        let html = `<span class="status-icon">✅</span><span>Agent completed`;
-        if (fileCount > 0) {
-          html += ` — ${fileCount} file${fileCount !== 1 ? 's' : ''} modified`;
-        }
-        html += `</span>`;
+        let html = `<span class="status-icon">✅</span><span>Agent completed</span>`;
 
         if (fileCount > 0) {
           // Store modified files for revert
           state._lastModifiedFiles = modifiedFiles;
+
+          // Collapsible "Code Changes" dropdown
+          const dropdownId = 'code-changes-' + Date.now();
+          html += `<div class="code-changes-dropdown">`;
+          html += `<div class="code-changes-toggle" onclick="document.getElementById('${dropdownId}').classList.toggle('expanded'); this.classList.toggle('open')">`;
+          html += `<span class="code-changes-arrow">▸</span>`;
+          html += `<span>Code Changes</span>`;
+          html += `<span class="code-changes-badge">${fileCount} file${fileCount !== 1 ? 's' : ''}</span>`;
+          html += `</div>`;
+          html += `<div id="${dropdownId}" class="code-changes-content">`;
 
           html += `<div class="agent-change-actions">`;
           html += `<button class="change-accept-btn" onclick="window.__acceptChanges()">Accept Changes</button>`;
@@ -924,15 +930,12 @@
             }
             html += `</div>`;
           }
+
+          html += `</div></div>`; // close code-changes-content + dropdown
         }
 
         banner.innerHTML = html;
-        // Auto-hide after 30 seconds if no action taken
-        setTimeout(() => {
-          if (banner.classList.contains('completed')) {
-            banner.style.display = 'none';
-          }
-        }, 30000);
+        // Banner stays until Accept/Revert — no auto-hide
         break;
       }
 
