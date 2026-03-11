@@ -433,17 +433,23 @@ export class MobileCopilotServer {
         // Mark the response as complete so reconnect replay works
         this.markAgentResponseComplete(ws);
 
-        // Emit agent.status → completed with modified files
+        // Compute per-file diffs for the mobile UI
+        const fileDiffs = await this.computeFileDiffs();
+
+        // Emit agent.status → completed with modified files and diffs
         this.sendToAllSessions('agent.status', {
           status: 'completed',
           modifiedFiles: Array.from(this.agentModifiedFiles),
+          diffs: fileDiffs,
           timestamp: Date.now(),
         });
       } catch (err: any) {
+        const fileDiffs = await this.computeFileDiffs();
         this.sendToAllSessions('agent.status', {
           status: 'failed',
           error: err.message || 'Agent error',
           modifiedFiles: Array.from(this.agentModifiedFiles),
+          diffs: fileDiffs,
           timestamp: Date.now(),
         });
         throw err;
@@ -1220,6 +1226,77 @@ export class MobileCopilotServer {
         this.outputChannel.info(`[Session] Buffering ${chunk.length} chars for disconnected session ${sessionId}`);
       }
     };
+  }
+
+  /**
+   * Compute per-file unified diffs for all files modified by the agent.
+   * Returns an array of { path, diff } objects with the git diff output.
+   */
+  private async computeFileDiffs(): Promise<Array<{ path: string; diff: string }>> {
+    const files = Array.from(this.agentModifiedFiles);
+    if (files.length === 0) return [];
+
+    const wsFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!wsFolder) return [];
+
+    const results: Array<{ path: string; diff: string }> = [];
+    const { execSync } = require('child_process');
+
+    for (const filePath of files) {
+      try {
+        // Try staged diff first, then unstaged
+        let diff = '';
+        try {
+          diff = execSync(`git diff --no-color -- "${filePath}"`, {
+            cwd: wsFolder.uri.fsPath,
+            encoding: 'utf-8',
+            maxBuffer: 1024 * 256,
+          }).trim();
+        } catch { /* ignore */ }
+
+        if (!diff) {
+          try {
+            diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+              cwd: wsFolder.uri.fsPath,
+              encoding: 'utf-8',
+              maxBuffer: 1024 * 256,
+            }).trim();
+          } catch { /* ignore */ }
+        }
+
+        // For new untracked files, show entire content as added
+        if (!diff) {
+          try {
+            const status = execSync(`git status --porcelain -- "${filePath}"`, {
+              cwd: wsFolder.uri.fsPath,
+              encoding: 'utf-8',
+            }).trim();
+            if (status.startsWith('??') || status.startsWith('A ')) {
+              const content = execSync(`cat "${filePath}"`, {
+                cwd: wsFolder.uri.fsPath,
+                encoding: 'utf-8',
+                maxBuffer: 1024 * 256,
+              });
+              const lines = content.split('\n');
+              diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n` +
+                lines.map((l: string) => '+' + l).join('\n');
+            }
+          } catch { /* ignore */ }
+        }
+
+        if (diff) {
+          // Truncate very large diffs
+          if (diff.length > 10000) {
+            diff = diff.substring(0, 10000) + '\n... (truncated, diff too large)';
+          }
+          results.push({ path: filePath, diff });
+        }
+      } catch (err: any) {
+        this.outputChannel.warn(`[Diff] Failed to compute diff for ${filePath}: ${err.message}`);
+      }
+    }
+
+    return results;
   }
 
   /**

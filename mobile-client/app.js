@@ -805,6 +805,53 @@
     });
   };
 
+  // ─── Feature: Unified Diff Renderer ────────────────────
+
+  /**
+   * Render a unified diff string into syntax-highlighted HTML.
+   * Lines starting with + are green (added), - are red (removed),
+   * @@ are blue (hunk headers), and the rest are dimmed context.
+   */
+  function renderUnifiedDiff(diffText) {
+    const lines = diffText.split('\n');
+    let html = '<div class="unified-diff">';
+    let lineNumOld = 0;
+    let lineNumNew = 0;
+
+    for (const line of lines) {
+      // Skip diff header lines (---, +++, diff --git, index)
+      if (line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
+        continue;
+      }
+
+      if (line.startsWith('@@')) {
+        // Parse hunk header for line numbers
+        const match = line.match(/@@ -(\d+)/);
+        if (match) lineNumOld = parseInt(match[1], 10);
+        const matchNew = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
+        if (matchNew) lineNumNew = parseInt(matchNew[1], 10);
+        html += `<div class="diff-line diff-hunk"><span class="diff-line-num"></span><span class="diff-line-num"></span><span class="diff-line-content">${escapeHtml(line)}</span></div>`;
+        continue;
+      }
+
+      if (line.startsWith('+')) {
+        html += `<div class="diff-line diff-line-added"><span class="diff-line-num"></span><span class="diff-line-num">${lineNumNew}</span><span class="diff-line-content">${escapeHtml(line)}</span></div>`;
+        lineNumNew++;
+      } else if (line.startsWith('-')) {
+        html += `<div class="diff-line diff-line-removed"><span class="diff-line-num">${lineNumOld}</span><span class="diff-line-num"></span><span class="diff-line-content">${escapeHtml(line)}</span></div>`;
+        lineNumOld++;
+      } else {
+        // Context line
+        html += `<div class="diff-line diff-line-context"><span class="diff-line-num">${lineNumOld}</span><span class="diff-line-num">${lineNumNew}</span><span class="diff-line-content">${escapeHtml(line || ' ')}</span></div>`;
+        lineNumOld++;
+        lineNumNew++;
+      }
+    }
+
+    html += '</div>';
+    return html;
+  }
+
   // ─── Feature: Agent Status Indicator ──────────────────
 
   /**
@@ -813,7 +860,7 @@
    * and Accept/Revert buttons when it completes with file changes.
    */
   function handleAgentStatus(params) {
-    const { status, modifiedFiles, error } = params;
+    const { status, modifiedFiles, error, diffs } = params;
 
     // Update or create the status banner
     let banner = $('#agent-status-banner');
@@ -848,11 +895,35 @@
           html += `<button class="change-accept-btn" onclick="window.__acceptChanges()">Accept Changes</button>`;
           html += `<button class="change-revert-btn" onclick="window.__revertChanges()">Revert Changes</button>`;
           html += `</div>`;
-          html += `<div class="modified-files-list">`;
-          for (const f of modifiedFiles) {
-            html += `<div class="modified-file"><a href="#" onclick="window.__openFile('${escapeHtml(f)}'); return false;">${escapeHtml(f)}</a></div>`;
+
+          // Render full unified diffs if available
+          if (diffs && diffs.length > 0) {
+            html += `<div class="agent-diffs">`;
+            for (const fileDiff of diffs) {
+              const diffId = 'udiff-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+              html += `<div class="agent-diff-file">`;
+              html += `<div class="agent-diff-header" onclick="document.getElementById('${diffId}').classList.toggle('expanded')">`;
+              html += `<span class="agent-diff-arrow">▸</span>`;
+              html += `<a class="diff-file-link" href="#" onclick="event.stopPropagation(); window.__openFile('${escapeHtml(fileDiff.path)}'); return false;">${escapeHtml(fileDiff.path)}</a>`;
+              // Count added/removed lines
+              const lines = fileDiff.diff.split('\n');
+              const added = lines.filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+              const removed = lines.filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+              html += `<span class="diff-stats"><span class="diff-added">+${added}</span> <span class="diff-removed">-${removed}</span></span>`;
+              html += `</div>`;
+              html += `<div id="${diffId}" class="agent-diff-body">`;
+              html += renderUnifiedDiff(fileDiff.diff);
+              html += `</div></div>`;
+            }
+            html += `</div>`;
+          } else {
+            // Fallback: just list modified files
+            html += `<div class="modified-files-list">`;
+            for (const f of modifiedFiles) {
+              html += `<div class="modified-file"><a href="#" onclick="window.__openFile('${escapeHtml(f)}'); return false;">${escapeHtml(f)}</a></div>`;
+            }
+            html += `</div>`;
           }
-          html += `</div>`;
         }
 
         banner.innerHTML = html;
@@ -1066,8 +1137,15 @@
     dom.terminalInput.value = '';
 
     try {
-      const result = await rpcRequest('terminal.run', { command });
-      appendTerminalOutput(`Sent to terminal: ${result.terminalName}`, 'output');
+      const result = await rpcRequest('terminal.run', { command }, 60000);
+      if (result.output) {
+        appendTerminalOutput(result.output, 'output');
+        if (result.exitCode !== undefined && result.exitCode !== 0) {
+          appendTerminalOutput(`[Exit code: ${result.exitCode}]`, 'error');
+        }
+      } else {
+        appendTerminalOutput(`Sent to terminal: ${result.terminalName}`, 'output');
+      }
     } catch (err) {
       appendTerminalOutput(`Error: ${err.message}`, 'error');
     }

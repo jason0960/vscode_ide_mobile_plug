@@ -144,19 +144,55 @@ export class AgentOperations {
 
   // ─── Terminal Operations ────────────────────────────────────────
 
-  async runCommand(params: TerminalRunRequest): Promise<{ terminalName: string; sent: boolean }> {
+  async runCommand(params: TerminalRunRequest): Promise<{ terminalName: string; sent: boolean; output?: string; exitCode?: number }> {
     const name = params.terminalName || 'Mobile Copilot';
+    const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
-    let terminal = this.managedTerminals.get(name);
-    if (!terminal || terminal.exitStatus !== undefined) {
-      terminal = vscode.window.createTerminal({ name });
-      this.managedTerminals.set(name, terminal);
+    // Use child_process.exec to capture output
+    try {
+      const { exec } = require('child_process');
+      const result = await new Promise<{ output: string; exitCode: number }>((resolve) => {
+        exec(params.command, {
+          cwd: wsFolder || process.cwd(),
+          encoding: 'utf-8',
+          maxBuffer: 1024 * 512,
+          timeout: 55000, // 55s timeout (client has 60s)
+          env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+        }, (error: any, stdout: string, stderr: string) => {
+          const output = (stdout || '') + (stderr ? (stdout ? '\n' : '') + stderr : '');
+          resolve({
+            output: output.trim() || (error ? error.message : '(no output)'),
+            exitCode: error?.code ?? 0,
+          });
+        });
+      });
+
+      // Also show in VS Code terminal for desktop visibility
+      let terminal = this.managedTerminals.get(name);
+      if (!terminal || terminal.exitStatus !== undefined) {
+        terminal = vscode.window.createTerminal({ name });
+        this.managedTerminals.set(name, terminal);
+      }
+      terminal.sendText(params.command);
+
+      return {
+        terminalName: name,
+        sent: true,
+        output: result.output.length > 50000 ? result.output.substring(0, 50000) + '\n... (truncated)' : result.output,
+        exitCode: result.exitCode,
+      };
+    } catch (err: any) {
+      // Fallback: just send to VS Code terminal without capture
+      let terminal = this.managedTerminals.get(name);
+      if (!terminal || terminal.exitStatus !== undefined) {
+        terminal = vscode.window.createTerminal({ name });
+        this.managedTerminals.set(name, terminal);
+      }
+      terminal.show(true);
+      terminal.sendText(params.command);
+
+      return { terminalName: name, sent: true, output: `Sent to terminal (output capture failed: ${err.message})` };
     }
-
-    terminal.show(true); // Show but don't steal focus
-    terminal.sendText(params.command);
-
-    return { terminalName: name, sent: true };
   }
 
   getTerminals() {

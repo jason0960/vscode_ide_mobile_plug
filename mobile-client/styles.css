@@ -1518,3 +1518,133 @@ body {
 .diff-file-link:active {
   text-decoration: underline;
 }
+
+/* ── Unified Diff Viewer ── */
+
+.agent-diffs {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-diff-file {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.agent-diff-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.agent-diff-header:active {
+  opacity: 0.8;
+}
+
+.agent-diff-arrow {
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: transform 0.15s;
+}
+
+.agent-diff-body.expanded + .agent-diff-header .agent-diff-arrow,
+.agent-diff-header:has(+ .agent-diff-body.expanded) .agent-diff-arrow {
+  transform: rotate(90deg);
+}
+
+.agent-diff-header .diff-file-link {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-diff-header .diff-stats {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.agent-diff-body {
+  display: none;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.agent-diff-body.expanded {
+  display: block;
+}
+
+.unified-diff {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  min-width: 100%;
+  width: max-content;
+}
+
+.diff-line {
+  display: flex;
+  white-space: pre;
+  min-height: 18px;
+}
+
+.diff-line-num {
+  display: inline-block;
+  width: 36px;
+  min-width: 36px;
+  text-align: right;
+  padding-right: 6px;
+  color: var(--text-secondary);
+  opacity: 0.5;
+  font-size: 10px;
+  user-select: none;
+  -webkit-user-select: none;
+  flex-shrink: 0;
+}
+
+.diff-line-content {
+  flex: 1;
+  padding: 0 8px;
+}
+
+.diff-line-added {
+  background: rgba(35, 134, 54, 0.2);
+}
+
+.diff-line-added .diff-line-content {
+  color: #3fb950;
+}
+
+.diff-line-removed {
+  background: rgba(248, 81, 73, 0.2);
+}
+
+.diff-line-removed .diff-line-content {
+  color: #f85149;
+}
+
+.diff-line-context {
+  color: var(--text-secondary);
+}
+
+.diff-hunk {
+  background: rgba(56, 139, 253, 0.1);
+  color: var(--accent);
+}
+
+.diff-hunk .diff-line-content {
+  color: var(--accent);
+  font-style: italic;
+}
