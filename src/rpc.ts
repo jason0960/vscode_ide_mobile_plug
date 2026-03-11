@@ -8,7 +8,7 @@ import WebSocket = require('ws');
  */
 export class RpcHandler {
   private handlers: Map<string, (params: any) => Promise<any>> = new Map();
-  private streamHandlers: Map<string, (params: any, send: (chunk: string) => void) => Promise<void>> =
+  private streamHandlers: Map<string, (params: any, send: (chunk: string) => void, ws: WebSocket) => Promise<void>> =
     new Map();
   private pendingRequests: Map<string, { resolve: Function; reject: Function }> = new Map();
 
@@ -21,11 +21,12 @@ export class RpcHandler {
 
   /**
    * Register a streaming handler for a method.
-   * The handler receives a `send` callback to push stream chunks.
+   * The handler receives a `send` callback to push stream chunks,
+   * and the WebSocket for session-aware buffering.
    */
   onStream(
     method: string,
-    handler: (params: any, send: (chunk: string) => void) => Promise<void>
+    handler: (params: any, send: (chunk: string) => void, ws: WebSocket) => Promise<void>
   ): void {
     this.streamHandlers.set(method, handler);
   }
@@ -69,7 +70,7 @@ export class RpcHandler {
           const send = (chunk: string) => {
             this.sendStream(ws, msg.id, msg.method!, chunk);
           };
-          await streamHandler(msg.params, send);
+          await streamHandler(msg.params, send, ws);
           // Final message to signal stream end
           this.sendResponse(ws, msg.id, { done: true });
         } catch (err: any) {

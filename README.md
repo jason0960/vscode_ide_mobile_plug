@@ -271,7 +271,20 @@ Tap **Diagnostics** to see all errors and warnings across your workspace. The ba
 | `mobileCopilot.tunnelProvider` | `none` | `none`, `vscode`, `cloudflare`, or `ngrok` |
 | `mobileCopilot.autoStart` | `false` | Auto-start server when VS Code opens |
 | `mobileCopilot.sessionTimeout` | `3600` | Session timeout in seconds (0 = never expire) |
+| `mobileCopilot.captureMode` | `relay` | How agent responses are captured: `relay`, `interceptor`, or `hybrid` (see below) |
 | `mobileCopilot.modelFamily` | `gpt-4o` | Default model for Chat mode |
+
+### Capture Modes
+
+The `mobileCopilot.captureMode` setting controls how the extension captures Copilot Chat agent responses and sends them to your phone.
+
+| Mode | How It Works | Reliability | Prompt Pollution |
+|------|-------------|-------------|------------------|
+| **`relay`** (default) | Appends an instruction to the prompt asking Copilot to write its response to a temp file. A FileSystemWatcher detects the write and streams it to your phone. The file is auto-deleted. | **High** — deterministic, proven | Yes — adds ~100 words to each prompt |
+| **`interceptor`** | Sends the raw prompt (no modification). Monitors all VS Code document change events to detect chat-related documents. Logs every URI scheme for discovery. | **Experimental** — may miss text-only responses | None |
+| **`hybrid`** | Runs both strategies simultaneously. Relay captures the response. Interceptor logs URI data in the background. If relay fails, falls back to interceptor results. | **High** — best of both worlds | Yes (same as relay) |
+
+**Recommendation:** Use `relay` for daily use. Use `hybrid` if you want to help discover whether VS Code exposes chat responses as observable documents — check the "Mobile Copilot" output channel for URI logs.
 
 ---
 
@@ -341,8 +354,9 @@ If you're on iPhone:
 Your Phone (PWA)                    Your Desktop (VS Code)
 ─────────────────                   ──────────────────────
 app.js                              ┌─ extension.ts (entry point)
-  ↕ WebSocket + JSON-RPC            ├─ server.ts (Express + WebSocket)
-  ↕ (direct LAN or via tunnel)      ├─ auth.ts (QR pairing, tokens)
+  ↕ WebSocket + JSON-RPC            ├─ server.ts (Express + WebSocket + capture logic)
+  ↕ (direct LAN or via tunnel)      ├─ interceptor.ts (document change monitor)
+                                    ├─ auth.ts (QR pairing, tokens)
                                     ├─ rpc.ts (JSON-RPC protocol)
                                     ├─ copilot.ts (vscode.lm API bridge)
                                     ├─ participant.ts (@mobile chat participant)
@@ -351,16 +365,48 @@ app.js                              ┌─ extension.ts (entry point)
                                     └─ tunnel.ts (Cloudflare/ngrok/VS Code)
 ```
 
-### Agent Mode — File Relay
+### Agent Mode — Response Capture
 
 1. You send a prompt from your phone
-2. The extension injects it into the native VS Code Copilot Chat panel (with workspace context)
+2. The extension injects it into the native VS Code Copilot Chat panel
 3. Copilot processes it with full tool use (edits files, runs commands, etc.)
-4. Copilot's response is written to `.copilot-mobile-relay.md`
-5. A FileSystemWatcher detects the write and streams content back to your phone
-6. The relay file is automatically deleted
+4. The response is captured based on the configured `captureMode`:
+   - **relay**: Copilot writes its response to `.copilot-mobile-relay.md` → FileSystemWatcher streams it to your phone → file is auto-deleted
+   - **interceptor**: Document change events are monitored for chat-related URI schemes; workspace file changes are tracked with structured diffs
+   - **hybrid**: Both run concurrently; relay handles response, interceptor logs URI data
+5. Your phone receives the response in real-time
 
-You get the **exact same Copilot response** that appears on the desktop.
+### Live Activity Feed
+
+While the agent is working, your phone receives a real-time activity feed showing:
+- Files created, modified, saved, and deleted
+- Terminal commands opened
+- Diagnostics changes (errors/warnings)
+- **Structured diffs** — lines added/removed per file, with change previews
+
+Example activity event:
+```json
+{
+  "type": "edit",
+  "detail": "Editing: src/auth.ts (+12 -3)",
+  "diff": {
+    "path": "src/auth.ts",
+    "linesAdded": 12,
+    "linesRemoved": 3,
+    "changes": [{ "range": "L15-L18", "preview": "const token = ..." }]
+  }
+}
+```
+
+### Document Change Logging
+
+When `captureMode` is `interceptor` or `hybrid`, the extension logs every `onDidChangeTextDocument` event to the "Mobile Copilot" output channel, including:
+- Full document URI
+- URI scheme (e.g., `file`, `vscode-chat`, `untitled`, etc.)
+- Document language ID
+- Number and size of content changes
+
+This is useful for discovering if VS Code exposes Copilot Chat responses as observable documents in future updates.
 
 ---
 

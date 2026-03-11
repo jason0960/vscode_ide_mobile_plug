@@ -35,7 +35,7 @@ const buildOptions = {
   entryPoints: ['./src/extension.ts'],
   bundle: true,
   outfile: './dist/extension.js',
-  external: ['vscode', 'ws', 'express', 'qrcode'],
+  external: ['vscode'],
   format: 'cjs',
   platform: 'node',
   target: 'node20',

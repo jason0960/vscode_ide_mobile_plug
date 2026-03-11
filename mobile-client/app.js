@@ -356,6 +356,11 @@
         showConnectError('Authentication failed. Rescan QR code.');
         break;
 
+      case 'session.missedResponse':
+        // Server replayed a response we missed while disconnected
+        handleMissedResponse(msg.params);
+        break;
+
       case 'diagnostics.changed':
         updateDiagBadge(msg.params);
         break;
@@ -369,6 +374,10 @@
         if (state.agentWorking) {
           appendAgentActivity(msg.params);
         }
+        break;
+
+      case 'agent.status':
+        handleAgentStatus(msg.params);
         break;
 
       case 'file.created':
@@ -542,6 +551,74 @@
   }
 
   /**
+   * Handle a missed response replayed by the server after reconnection.
+   * This fires when the phone was disconnected while an agent response was
+   * being streamed. The server accumulated the full content and sends it
+   * as a `session.missedResponse` event on re-auth.
+   */
+  function handleMissedResponse(params) {
+    const { content, complete, timestamp } = params;
+    if (!content || content.length === 0) return;
+
+    console.log(`[Session] Received missed response: ${content.length} chars, complete=${complete}`);
+
+    // Check if this content already matches the last assistant message
+    // (avoid duplicates if the phone only briefly disconnected)
+    const lastMsg = state.messages[state.messages.length - 1];
+    if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content === content) {
+      console.log('[Session] Missed response matches last message, skipping duplicate');
+      return;
+    }
+
+    // If there's a partial/empty assistant message from the interrupted stream,
+    // check if the missed response is a superset and replace it
+    if (lastMsg && lastMsg.role === 'assistant' && content.startsWith(lastMsg.content)) {
+      // The missed response extends the partial — update in place
+      lastMsg.content = content;
+      lastMsg.timestamp = timestamp || Date.now();
+      saveChatHistory();
+
+      // Re-render the last message
+      const lastEl = dom.chatMessages.querySelector('.message.assistant:last-child');
+      if (lastEl) {
+        finalizeAssistant(lastEl, content);
+      }
+      console.log('[Session] Updated partial message with complete response');
+      notifyResponseComplete(content);
+      scrollToBottom();
+      return;
+    }
+
+    // Render as a new message with a reconnect indicator
+    const el = document.createElement('div');
+    el.className = 'message assistant';
+    const time = new Date(timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    el.innerHTML = `
+      <div class="message-header">
+        <span class="message-role assistant">Copilot</span>
+        <span class="reconnect-badge">reconnected</span>
+        <span class="message-time">${time}</span>
+      </div>
+      <div class="message-body">${renderMarkdown(content)}</div>
+    `;
+    dom.chatMessages.appendChild(el);
+    addCopyButtons(el);
+
+    // Save to chat history
+    state.messages.push({
+      role: 'assistant',
+      content,
+      timestamp: timestamp || Date.now(),
+    });
+    saveChatHistory();
+    notifyResponseComplete(content);
+    scrollToBottom();
+
+    // Also stop the agent working indicator if it was still up
+    state.agentWorking = false;
+  }
+
+  /**
    * Chat Mode — raw LLM streaming via vscode.lm API.
    * Good for quick questions, no tool/agent capabilities.
    */
@@ -669,7 +746,29 @@
       hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
 
-    activityEl.innerHTML = `<span class="activity-icon">${icon}</span><span class="activity-detail">${escapeHtml(activity.detail)}</span><span class="activity-time">${time}</span>`;
+    // Build the main activity line
+    let html = `<span class="activity-icon">${icon}</span><span class="activity-detail">${escapeHtml(activity.detail)}</span><span class="activity-time">${time}</span>`;
+
+    // If this is an edit with diff data, add an expandable diff preview
+    if (activity.type === 'edit' && activity.diff) {
+      const d = activity.diff;
+      const diffId = 'diff-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+      html += `<button class="diff-toggle" onclick="document.getElementById('${diffId}').classList.toggle('expanded')" title="Show diff">▸</button>`;
+      html += `<div id="${diffId}" class="diff-preview">`;
+      html += `<div class="diff-stats"><span class="diff-added">+${d.linesAdded}</span> <span class="diff-removed">-${d.linesRemoved}</span> in <a class="diff-file-link" href="#" onclick="window.__openFile('${escapeHtml(d.path)}'); return false;"><strong>${escapeHtml(d.path)}</strong></a></div>`;
+      if (d.changes && d.changes.length > 0) {
+        for (const change of d.changes) {
+          html += `<div class="diff-change"><span class="diff-range">${escapeHtml(change.range)}</span>`;
+          if (change.preview) {
+            html += `<pre class="diff-code">${escapeHtml(change.preview)}</pre>`;
+          }
+          html += `</div>`;
+        }
+      }
+      html += `</div>`;
+    }
+
+    activityEl.innerHTML = html;
 
     feed.appendChild(activityEl);
 
@@ -690,6 +789,126 @@
       updateAgentStatus(agentEl, 'done', `Agent finished — ${count} workspace action${count !== 1 ? 's' : ''} detected`);
     }
     state.agentWorking = false;
+  };
+
+  // ─── Feature: Open File from Diff ─────────────────────
+
+  /**
+   * Global handler: tap a file path in a diff preview to open it in VS Code.
+   */
+  window.__openFile = function (filePath) {
+    if (!state.authenticated) return;
+    rpcRequest('editor.open', { path: filePath }).then(() => {
+      console.log(`[Open] Opened ${filePath} in VS Code`);
+    }).catch((err) => {
+      console.error(`[Open] Failed to open ${filePath}:`, err);
+    });
+  };
+
+  // ─── Feature: Agent Status Indicator ──────────────────
+
+  /**
+   * Handle agent.status events from the server.
+   * Shows a persistent status banner while the agent is running,
+   * and Accept/Revert buttons when it completes with file changes.
+   */
+  function handleAgentStatus(params) {
+    const { status, modifiedFiles, error } = params;
+
+    // Update or create the status banner
+    let banner = $('#agent-status-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'agent-status-banner';
+      // Insert at top of chat messages
+      dom.chatMessages.insertBefore(banner, dom.chatMessages.firstChild);
+    }
+
+    switch (status) {
+      case 'running':
+        banner.className = 'agent-status-banner running';
+        banner.innerHTML = `<div class="agent-spinner"></div><span>Agent running…</span>`;
+        banner.style.display = '';
+        break;
+
+      case 'completed': {
+        const fileCount = modifiedFiles?.length || 0;
+        banner.className = 'agent-status-banner completed';
+        let html = `<span class="status-icon">✅</span><span>Agent completed`;
+        if (fileCount > 0) {
+          html += ` — ${fileCount} file${fileCount !== 1 ? 's' : ''} modified`;
+        }
+        html += `</span>`;
+
+        if (fileCount > 0) {
+          // Store modified files for revert
+          state._lastModifiedFiles = modifiedFiles;
+
+          html += `<div class="agent-change-actions">`;
+          html += `<button class="change-accept-btn" onclick="window.__acceptChanges()">Accept Changes</button>`;
+          html += `<button class="change-revert-btn" onclick="window.__revertChanges()">Revert Changes</button>`;
+          html += `</div>`;
+          html += `<div class="modified-files-list">`;
+          for (const f of modifiedFiles) {
+            html += `<div class="modified-file"><a href="#" onclick="window.__openFile('${escapeHtml(f)}'); return false;">${escapeHtml(f)}</a></div>`;
+          }
+          html += `</div>`;
+        }
+
+        banner.innerHTML = html;
+        // Auto-hide after 30 seconds if no action taken
+        setTimeout(() => {
+          if (banner.classList.contains('completed')) {
+            banner.style.display = 'none';
+          }
+        }, 30000);
+        break;
+      }
+
+      case 'failed':
+        banner.className = 'agent-status-banner failed';
+        banner.innerHTML = `<span class="status-icon">❌</span><span>Agent failed${error ? ': ' + escapeHtml(error) : ''}</span>`;
+        setTimeout(() => { banner.style.display = 'none'; }, 10000);
+        break;
+
+      default:
+        banner.style.display = 'none';
+    }
+
+    scrollToBottom();
+  }
+
+  // ─── Feature: Accept / Revert Changes ──────────────────
+
+  window.__acceptChanges = function () {
+    const banner = $('#agent-status-banner');
+    if (banner) {
+      banner.className = 'agent-status-banner accepted';
+      banner.innerHTML = `<span class="status-icon">✅</span><span>Changes accepted</span>`;
+      setTimeout(() => { banner.style.display = 'none'; }, 3000);
+    }
+    state._lastModifiedFiles = null;
+  };
+
+  window.__revertChanges = async function () {
+    const banner = $('#agent-status-banner');
+    if (!banner) return;
+
+    const files = state._lastModifiedFiles;
+    banner.innerHTML = `<div class="agent-spinner"></div><span>Reverting changes…</span>`;
+    banner.className = 'agent-status-banner running';
+
+    try {
+      const result = await rpcRequest('git.restoreChanges', { files }, 30000);
+      banner.className = 'agent-status-banner accepted';
+      banner.innerHTML = `<span class="status-icon">↩️</span><span>Reverted ${result.restored} file${result.restored !== 1 ? 's' : ''}</span>`;
+      state._lastModifiedFiles = null;
+      setTimeout(() => { banner.style.display = 'none'; }, 5000);
+    } catch (err) {
+      banner.className = 'agent-status-banner failed';
+      banner.innerHTML = `<span class="status-icon">❌</span><span>Revert failed: ${escapeHtml(err.message)}</span>`;
+      setTimeout(() => { banner.style.display = 'none'; }, 8000);
+    }
   };
 
   function renderMessage(msg) {
@@ -860,6 +1079,83 @@
     line.textContent = text;
     dom.terminalOutput.appendChild(line);
     dom.terminalOutput.scrollTop = dom.terminalOutput.scrollHeight;
+  }
+
+  // ─── Quick Commands Panel ─────────────────────────────
+
+  async function runQuickCommand(command, needsInput, inputPrompt) {
+    if (!state.authenticated) return;
+
+    let finalCmd = command;
+
+    // If the command requires user input (e.g., commit message), prompt for it
+    if (needsInput) {
+      const userInput = prompt(inputPrompt || 'Enter value:');
+      if (userInput === null || userInput.trim() === '') return; // cancelled
+      finalCmd = command.replace('{input}', userInput.trim());
+    }
+
+    // Show output area
+    const outputEl = $('#command-output');
+    const titleEl = $('#command-output-title');
+    const contentEl = $('#command-output-content');
+
+    outputEl.style.display = '';
+    titleEl.textContent = `$ ${finalCmd}`;
+    contentEl.textContent = 'Running...\n';
+
+    try {
+      const result = await rpcRequest('terminal.run', { command: finalCmd }, 60000);
+      contentEl.textContent = result.output || result.terminalName || 'Command sent to terminal.';
+      if (result.exitCode !== undefined && result.exitCode !== 0) {
+        contentEl.textContent += `\n\n[Exit code: ${result.exitCode}]`;
+      }
+    } catch (err) {
+      contentEl.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  function setupCommandsPanel() {
+    // Quick command buttons
+    $$('#panel-commands .command-btn[data-cmd]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const cmd = btn.dataset.cmd;
+        const needsInput = btn.classList.contains('command-needs-input');
+        const inputPrompt = btn.dataset.prompt;
+        runQuickCommand(cmd, needsInput, inputPrompt);
+      });
+    });
+
+    // Custom command
+    const customInput = $('#custom-command-input');
+    const customRun = $('#custom-command-run');
+
+    if (customRun) {
+      customRun.addEventListener('click', () => {
+        if (customInput.value.trim()) {
+          runQuickCommand(customInput.value.trim(), false);
+          customInput.value = '';
+        }
+      });
+    }
+
+    if (customInput) {
+      customInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && customInput.value.trim()) {
+          runQuickCommand(customInput.value.trim(), false);
+          customInput.value = '';
+        }
+      });
+    }
+
+    // Close output
+    const closeBtn = $('#command-output-close');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => {
+        const outputEl = $('#command-output');
+        if (outputEl) outputEl.style.display = 'none';
+      });
+    }
   }
 
   // ─── Diagnostics Panel ────────────────────────────────
@@ -1265,6 +1561,9 @@
         connect();
       }
     });
+
+    // Setup quick commands panel
+    setupCommandsPanel();
   }
 
   // ─── Service Worker Registration ──────────────────────

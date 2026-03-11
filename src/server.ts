@@ -11,6 +11,23 @@ import { ContextProvider } from './context';
 import { AgentOperations } from './agent';
 import { TunnelManager } from './tunnel';
 import { ServerState, ChatMessage } from './types';
+import { ChatResponseInterceptor } from './interceptor';
+
+/** Tracks per-session state for message buffering across disconnects. */
+interface SessionState {
+  /** Current WebSocket, or null if disconnected. */
+  ws: WebSocket | null;
+  /** Messages queued while the phone was disconnected. */
+  eventQueue: Array<{ method: string; data: any }>;
+  /** Last agent response — accumulated during streaming so it can be replayed on reconnect. */
+  lastAgentResponse: {
+    content: string;
+    complete: boolean;
+    timestamp: number;
+  } | null;
+}
+
+const MAX_EVENT_QUEUE_SIZE = 200;
 
 /**
  * Main server — HTTP + WebSocket.
@@ -28,10 +45,12 @@ export class MobileCopilotServer {
   private tunnel: TunnelManager;
   private outputChannel: vscode.LogOutputChannel;
   private clients: Map<WebSocket, { sessionId: string; authenticated: boolean }> = new Map();
+  private sessions: Map<string, SessionState> = new Map();
   private port: number;
   private statusBarItem: vscode.StatusBarItem;
   private disposables: vscode.Disposable[] = [];
   private extensionContext: vscode.ExtensionContext;
+  private interceptor: ChatResponseInterceptor;
 
   constructor(context: vscode.ExtensionContext, outputChannel: vscode.LogOutputChannel) {
     this.extensionContext = context;
@@ -45,6 +64,7 @@ export class MobileCopilotServer {
     this.contextProvider = new ContextProvider();
     this.agent = new AgentOperations(this.contextProvider, outputChannel);
     this.tunnel = new TunnelManager(outputChannel);
+    this.interceptor = new ChatResponseInterceptor(outputChannel);
 
     // Status bar
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -236,11 +256,21 @@ export class MobileCopilotServer {
     // Serve PWA static files
     const mobilePath = path.join(__dirname, 'mobile');
     if (fs.existsSync(mobilePath)) {
-      this.app.use(express.static(mobilePath));
+      // Disable caching for HTML/JS/CSS so updates propagate immediately
+      this.app.use((req, res, next) => {
+        if (req.path.endsWith('.html') || req.path.endsWith('.js') || req.path.endsWith('.css') || req.path === '/') {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.setHeader('Pragma', 'no-cache');
+          res.setHeader('Expires', '0');
+        }
+        next();
+      });
+      this.app.use(express.static(mobilePath, { etag: false }));
 
       // SPA fallback — serve index.html for unmatched routes
       this.app.get('*', (req, res) => {
         if (!req.path.startsWith('/api') && !req.path.startsWith('/ws')) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
           res.sendFile(path.join(mobilePath, 'index.html'));
         }
       });
@@ -276,7 +306,9 @@ export class MobileCopilotServer {
               if (valid) {
                 clientInfo.authenticated = true;
                 clientInfo.sessionId = msg.params.sessionId;
+                this.registerSession(msg.params.sessionId, ws);
                 this.rpc.sendEvent(ws, 'auth.success', { sessionId: msg.params.sessionId });
+                this.flushSessionQueue(msg.params.sessionId);
                 this.updateStatusBar('connected');
                 this.outputChannel.info(`Client authenticated: ${msg.params.sessionId}`);
                 return;
@@ -289,7 +321,9 @@ export class MobileCopilotServer {
                 const session = this.auth.createSession();
                 clientInfo.authenticated = true;
                 clientInfo.sessionId = session.id;
+                this.registerSession(session.id, ws);
                 this.rpc.sendEvent(ws, 'auth.success', { sessionId: session.id });
+                this.flushSessionQueue(session.id);
                 this.updateStatusBar('connected');
                 this.outputChannel.info(`Client authenticated via token: ${session.id}`);
                 return;
@@ -314,6 +348,16 @@ export class MobileCopilotServer {
         // phone can reconnect with the same sessionId without re-scanning
         // the QR code. Sessions expire naturally via sessionTimeoutSec.
         this.clients.delete(ws);
+
+        // Mark session as disconnected but keep the state (queue, last response)
+        if (clientInfo?.sessionId) {
+          const session = this.sessions.get(clientInfo.sessionId);
+          if (session) {
+            session.ws = null;
+            this.outputChannel.info(`[Session] ${clientInfo.sessionId} — socket closed, buffering enabled`);
+          }
+        }
+
         this.updateStatusBar(this.clients.size > 0 ? 'connected' : 'running');
         this.outputChannel.info(`Client disconnected (session ${clientInfo?.sessionId || 'none'} preserved)`);
       });
@@ -335,12 +379,12 @@ export class MobileCopilotServer {
   private setupRpcHandlers(): void {
     // ── Chat / Copilot ──
 
-    // AGENT MODE — file-relay approach.
-    // 1. Inject prompt into native Copilot Chat (full agent with tools on desktop)
-    // 2. Prompt includes instruction for Copilot to write its response to a relay file
-    // 3. FileSystemWatcher detects the write and streams content to mobile
-    // Result: Mobile gets the SAME response as desktop.
-    this.rpc.onStream('chat.sendToAgent', async (params, send) => {
+    // AGENT MODE — configurable capture strategy.
+    // captureMode setting controls how the response is captured:
+    //   "relay"       — augmented prompt + relay file (deterministic, proven)
+    //   "interceptor" — document change monitoring (experimental)
+    //   "hybrid"      — interceptor first, relay fallback
+    this.rpc.onStream('chat.sendToAgent', async (params, rawSend, ws) => {
       const { prompt } = params as { prompt: string };
       this.outputChannel.info(`[Agent] Received prompt from mobile: "${prompt?.substring(0, 80)}"`);
 
@@ -348,154 +392,66 @@ export class MobileCopilotServer {
         throw new Error('Prompt is required');
       }
 
+      // Wrap send() with session-aware buffering — if the phone disconnects
+      // mid-stream, chunks accumulate and replay on reconnect.
+      const send = this.createSessionAwareSend(ws, rawSend);
+
+      // Reset modified file tracking for this agent run
+      this.agentModifiedFiles.clear();
+
+      // Emit agent.status → started
+      this.sendToAllSessions('agent.status', { status: 'running', timestamp: Date.now() });
+
       // Start tracking agent activity
       this.startActivityTracking();
 
       const wsFolder = vscode.workspace.workspaceFolders?.[0];
       if (!wsFolder) {
+        this.sendToAllSessions('agent.status', { status: 'failed', error: 'No workspace folder open', timestamp: Date.now() });
         throw new Error('No workspace folder open');
       }
 
-      const RELAY_FILENAME = '.copilot-mobile-relay.md';
-      const relayUri = vscode.Uri.joinPath(wsFolder.uri, RELAY_FILENAME);
-      const DONE_MARKER = '<!-- MOBILE_DONE -->';
-      const TIMEOUT_MS = 180_000; // 3 min for agent work
-      const DEBOUNCE_MS = 4_000;  // 4s after last write = "done"
-
-      // Delete relay file instead of clearing (avoids triggering watcher with empty file)
       try {
-        await vscode.workspace.fs.delete(relayUri);
-      } catch { /* ignore if it doesn't exist */ }
+        const config = vscode.workspace.getConfiguration('mobileCopilot');
+        const captureMode = config.get<string>('captureMode', 'relay');
+        this.outputChannel.info(`[Agent] Capture mode: ${captureMode}`);
 
-      // Build the augmented prompt — tells Copilot to write its chat response to the relay file
-      const augmentedPrompt =
-        prompt + '\n\n' +
-        '--- IMPORTANT INSTRUCTION ---\n' +
-        `After your response, also write your COMPLETE chat response (what you just said above) ` +
-        `as markdown into the workspace file \`${RELAY_FILENAME}\`. ` +
-        `This is to relay your answer to a mobile client that cannot see the chat panel. ` +
-        `End the file content with exactly this marker on its own line: ${DONE_MARKER}\n` +
-        'Copy your full response including explanations, code blocks, and formatting. ' +
-        'Do NOT skip this step.';
-
-      // Watch for relay file changes and stream content to mobile
-      let lastContent = '';
-      let sentLength = 0;
-      let hasReceivedContent = false; // Only debounce AFTER we get real content
-
-      const relayPromise = new Promise<string>((resolve, reject) => {
-        let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-        let resolved = false;
-
-        const timeoutTimer = setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            watcher.dispose();
-            if (lastContent.length > 0) {
-              resolve(lastContent);
-            } else {
-              reject(new Error(
-                'Copilot did not write the relay file within 3 minutes. ' +
-                'The response may still be visible in the Chat panel on your desktop.'
-              ));
-            }
+        // Always start the interceptor for URI logging and file-change tracking
+        const interceptorSession = this.interceptor.startSession((chunk) => {
+          // Only stream interceptor chunks if we're in interceptor or hybrid mode
+          if (captureMode === 'interceptor' || captureMode === 'hybrid') {
+            send(chunk);
           }
-        }, TIMEOUT_MS);
+        });
 
-        const pattern = new vscode.RelativePattern(wsFolder, RELAY_FILENAME);
-        const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+        if (captureMode === 'relay' || captureMode === 'hybrid') {
+          await this.runRelayCapture(prompt, wsFolder, send, captureMode === 'hybrid' ? interceptorSession : null);
+        } else {
+          await this.runInterceptorCapture(prompt, send, interceptorSession);
+        }
 
-        const checkFile = async () => {
-          if (resolved) return;
-          try {
-            const bytes = await vscode.workspace.fs.readFile(relayUri);
-            const content = Buffer.from(bytes).toString('utf8').trim();
+        // Mark the response as complete so reconnect replay works
+        this.markAgentResponseComplete(ws);
 
-            // Skip empty file writes (e.g. file created but not yet written)
-            if (content.length === 0) {
-              this.outputChannel.info('[Agent] Relay file is empty, waiting for content...');
-              return;
-            }
-
-            if (content.length > sentLength) {
-              let newContent = content.substring(sentLength);
-              const cleanContent = newContent.replace(DONE_MARKER, '').trimEnd();
-              if (cleanContent.length > 0) {
-                hasReceivedContent = true;
-                send(cleanContent);
-                this.outputChannel.info(`[Agent] Sent ${cleanContent.length} chars to mobile`);
-              }
-              sentLength = content.length;
-              lastContent = content.replace(DONE_MARKER, '').trimEnd();
-            }
-
-            if (content.includes(DONE_MARKER)) {
-              resolved = true;
-              clearTimeout(timeoutTimer);
-              if (debounceTimer) clearTimeout(debounceTimer);
-              watcher.dispose();
-              this.outputChannel.info('[Agent] DONE marker detected in relay file');
-              resolve(lastContent);
-              return;
-            }
-
-            // Only start debounce AFTER we have received real content
-            if (hasReceivedContent) {
-              if (debounceTimer) clearTimeout(debounceTimer);
-              debounceTimer = setTimeout(async () => {
-                if (!resolved) {
-                  try {
-                    const finalBytes = await vscode.workspace.fs.readFile(relayUri);
-                    const finalContent = Buffer.from(finalBytes).toString('utf8');
-                    if (finalContent.length > sentLength) {
-                      const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
-                      if (remaining.length > 0) send(remaining);
-                      lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
-                    }
-                  } catch { /* ignore */ }
-
-                  resolved = true;
-                  clearTimeout(timeoutTimer);
-                  watcher.dispose();
-                  this.outputChannel.info('[Agent] Debounce timeout — assuming agent is done');
-                  resolve(lastContent);
-                }
-              }, DEBOUNCE_MS);
-            }
-          } catch (err: any) {
-            this.outputChannel.warn(`[Agent] Error reading relay file: ${err.message}`);
-          }
-        };
-
-        watcher.onDidChange(checkFile);
-        watcher.onDidCreate(checkFile);
-      });
-
-      // Inject prompt into native Copilot Chat panel
-      this.outputChannel.info('[Agent] Injecting prompt into native Copilot Chat panel...');
-      send('⏳ *Waiting for Copilot agent response on desktop...*\n\n');
-
-      vscode.commands.executeCommand('workbench.action.chat.open', {
-        query: augmentedPrompt,
-        isPartialQuery: false,
-      }).then(
-        () => this.outputChannel.info('[Agent] Chat panel command executed'),
-        (err: any) => this.outputChannel.error(`[Agent] Failed to open Chat panel: ${err.message}`)
-      );
-
-      // Wait for relay file
-      try {
-        const fullText = await relayPromise;
-        this.outputChannel.info(`[Agent] Relay complete — ${fullText.length} chars sent to mobile.`);
-        try { await vscode.workspace.fs.delete(relayUri); } catch { /* ignore */ }
+        // Emit agent.status → completed with modified files
+        this.sendToAllSessions('agent.status', {
+          status: 'completed',
+          modifiedFiles: Array.from(this.agentModifiedFiles),
+          timestamp: Date.now(),
+        });
       } catch (err: any) {
-        this.outputChannel.error(`[Agent] Relay error: ${err.message}`);
-        send(`\n\n⚠️ ${err.message}`);
+        this.sendToAllSessions('agent.status', {
+          status: 'failed',
+          error: err.message || 'Agent error',
+          modifiedFiles: Array.from(this.agentModifiedFiles),
+          timestamp: Date.now(),
+        });
+        throw err;
       }
     });
 
     // STREAMING MODE — uses vscode.lm API for raw LLM chat (no tools/agent).
-    this.rpc.onStream('chat.send', async (params, send) => {
+    this.rpc.onStream('chat.send', async (params, send, _ws) => {
       this.outputChannel.info(`[Chat] Received chat.send from mobile`);
       const { prompt, history, context, model } = params as {
         prompt: string;
@@ -604,6 +560,42 @@ export class MobileCopilotServer {
       return this.agent.gitDiff();
     });
 
+    // Revert agent changes — restores files modified during last agent run
+    this.rpc.onRequest('git.restoreChanges', async (params) => {
+      const files = params?.files as string[] | undefined;
+      const filesToRestore = files && files.length > 0
+        ? files
+        : Array.from(this.agentModifiedFiles);
+
+      if (filesToRestore.length === 0) {
+        return { restored: 0, message: 'No modified files to restore' };
+      }
+
+      // Use git restore for each file
+      const wsFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!wsFolder) throw new Error('No workspace folder open');
+
+      const results: string[] = [];
+      for (const filePath of filesToRestore) {
+        try {
+          const { execSync } = require('child_process');
+          execSync(`git restore "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+          results.push(filePath);
+        } catch (err: any) {
+          this.outputChannel.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
+        }
+      }
+
+      this.agentModifiedFiles.clear();
+      this.outputChannel.info(`[Git] Restored ${results.length} files`);
+      return { restored: results.length, files: results };
+    });
+
+    // Get list of files modified by the last agent run
+    this.rpc.onRequest('agent.modifiedFiles', async () => {
+      return { files: Array.from(this.agentModifiedFiles) };
+    });
+
     // ── Server State ──
     this.rpc.onRequest('server.state', async () => {
       return this.getState();
@@ -613,6 +605,234 @@ export class MobileCopilotServer {
     this.rpc.onRequest('ping', async () => {
       return { pong: true, timestamp: Date.now() };
     });
+  }
+
+  // ─── Capture Strategies ─────────────────────────────────────────
+
+  /**
+   * RELAY CAPTURE — the proven, deterministic approach.
+   * Augments the prompt with an instruction for Copilot to write its response
+   * to a relay file. FileSystemWatcher detects the write and streams to mobile.
+   * In hybrid mode, the interceptor session runs concurrently for URI logging.
+   */
+  private async runRelayCapture(
+    prompt: string,
+    wsFolder: vscode.WorkspaceFolder,
+    send: (chunk: string) => void,
+    hybridInterceptorSession: { wait: () => Promise<any> } | null,
+  ): Promise<void> {
+    const RELAY_FILENAME = '.copilot-mobile-relay.md';
+    const relayUri = vscode.Uri.joinPath(wsFolder.uri, RELAY_FILENAME);
+    const DONE_MARKER = '<!-- MOBILE_DONE -->';
+    const TIMEOUT_MS = 180_000; // 3 min for agent work
+    const DEBOUNCE_MS = 4_000;  // 4s after last write = "done"
+
+    // Delete relay file if it exists
+    try {
+      await vscode.workspace.fs.delete(relayUri);
+    } catch { /* ignore if it doesn't exist */ }
+
+    // Build the augmented prompt — tells Copilot to write its response to the relay file
+    const augmentedPrompt =
+      prompt + '\n\n' +
+      '--- IMPORTANT INSTRUCTION ---\n' +
+      `After your response, also write your COMPLETE chat response (what you just said above) ` +
+      `as markdown into the workspace file \`${RELAY_FILENAME}\`. ` +
+      `This is to relay your answer to a mobile client that cannot see the chat panel. ` +
+      `End the file content with exactly this marker on its own line: ${DONE_MARKER}\n` +
+      'Copy your full response including explanations, code blocks, and formatting. ' +
+      'Do NOT skip this step.';
+
+    // Watch for relay file changes and stream content to mobile
+    let lastContent = '';
+    let sentLength = 0;
+    let hasReceivedContent = false;
+
+    const relayPromise = new Promise<string>((resolve, reject) => {
+      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+      let resolved = false;
+
+      const timeoutTimer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          watcher.dispose();
+          if (lastContent.length > 0) {
+            resolve(lastContent);
+          } else {
+            reject(new Error(
+              'Copilot did not write the relay file within 3 minutes. ' +
+              'The response may still be visible in the Chat panel on your desktop.'
+            ));
+          }
+        }
+      }, TIMEOUT_MS);
+
+      const pattern = new vscode.RelativePattern(wsFolder, RELAY_FILENAME);
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+
+      const checkFile = async () => {
+        if (resolved) return;
+        try {
+          const bytes = await vscode.workspace.fs.readFile(relayUri);
+          const content = Buffer.from(bytes).toString('utf8').trim();
+
+          if (content.length === 0) {
+            this.outputChannel.info('[Relay] File is empty, waiting for content...');
+            return;
+          }
+
+          if (content.length > sentLength) {
+            let newContent = content.substring(sentLength);
+            const cleanContent = newContent.replace(DONE_MARKER, '').trimEnd();
+            if (cleanContent.length > 0) {
+              hasReceivedContent = true;
+              send(cleanContent);
+              this.outputChannel.info(`[Relay] Sent ${cleanContent.length} chars to mobile`);
+            }
+            sentLength = content.length;
+            lastContent = content.replace(DONE_MARKER, '').trimEnd();
+          }
+
+          if (content.includes(DONE_MARKER)) {
+            resolved = true;
+            clearTimeout(timeoutTimer);
+            if (debounceTimer) clearTimeout(debounceTimer);
+            watcher.dispose();
+            this.outputChannel.info('[Relay] DONE marker detected');
+            resolve(lastContent);
+            return;
+          }
+
+          if (hasReceivedContent) {
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(async () => {
+              if (!resolved) {
+                try {
+                  const finalBytes = await vscode.workspace.fs.readFile(relayUri);
+                  const finalContent = Buffer.from(finalBytes).toString('utf8');
+                  if (finalContent.length > sentLength) {
+                    const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
+                    if (remaining.length > 0) send(remaining);
+                    lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
+                  }
+                } catch { /* ignore */ }
+
+                resolved = true;
+                clearTimeout(timeoutTimer);
+                watcher.dispose();
+                this.outputChannel.info('[Relay] Debounce timeout — assuming done');
+                resolve(lastContent);
+              }
+            }, DEBOUNCE_MS);
+          }
+        } catch (err: any) {
+          this.outputChannel.warn(`[Relay] Error reading file: ${err.message}`);
+        }
+      };
+
+      watcher.onDidChange(checkFile);
+      watcher.onDidCreate(checkFile);
+    });
+
+    // Inject prompt into native Copilot Chat panel
+    this.outputChannel.info('[Relay] Injecting augmented prompt into Copilot Chat...');
+    send('⏳ *Waiting for Copilot agent response on desktop...*\n\n');
+
+    vscode.commands.executeCommand('workbench.action.chat.open', {
+      query: augmentedPrompt,
+      isPartialQuery: false,
+    }).then(
+      () => this.outputChannel.info('[Relay] Chat panel command executed'),
+      (err: any) => this.outputChannel.error(`[Relay] Failed to open Chat panel: ${err.message}`)
+    );
+
+    // Wait for relay file
+    try {
+      const fullText = await relayPromise;
+      this.outputChannel.info(`[Relay] Complete — ${fullText.length} chars sent to mobile.`);
+      try { await vscode.workspace.fs.delete(relayUri); } catch { /* ignore */ }
+    } catch (err: any) {
+      this.outputChannel.error(`[Relay] Error: ${err.message}`);
+
+      // HYBRID MODE: if relay failed and interceptor is running, wait for it
+      if (hybridInterceptorSession) {
+        this.outputChannel.info('[Hybrid] Relay failed, checking interceptor results...');
+        try {
+          const interceptResult = await hybridInterceptorSession.wait();
+          if (interceptResult.capturedText.length > 0) {
+            this.outputChannel.info(`[Hybrid] Interceptor captured ${interceptResult.capturedText.length} chars`);
+            // Already streamed via interceptor callback
+          } else if (interceptResult.fileChanges.length > 0) {
+            const summary = interceptResult.fileChanges
+              .map((fc: any) => `• **${fc.path}** — ${fc.linesAdded} added, ${fc.linesRemoved} removed`)
+              .join('\n');
+            send(`\n\n📁 **Agent modified files:**\n${summary}`);
+          } else {
+            send(`\n\n⚠️ ${err.message}`);
+          }
+        } catch {
+          send(`\n\n⚠️ ${err.message}`);
+        }
+      } else {
+        send(`\n\n⚠️ ${err.message}`);
+      }
+    }
+
+    // In hybrid mode, also log interceptor findings (don't block on it)
+    if (hybridInterceptorSession) {
+      hybridInterceptorSession.wait().then((result: any) => {
+        this.outputChannel.info(
+          `[Hybrid] Interceptor session completed. Schemes: [${Array.from(result.schemesSeen).join(', ')}]. ` +
+          `URIs: ${result.documentUris.length}. File changes: ${result.fileChanges.length}.`
+        );
+      }).catch(() => { /* ignore */ });
+    }
+  }
+
+  /**
+   * INTERCEPTOR CAPTURE — experimental, no prompt pollution.
+   * Monitors document changes and workspace activity to detect the response.
+   * Less reliable for text-only responses (no file changes).
+   */
+  private async runInterceptorCapture(
+    prompt: string,
+    send: (chunk: string) => void,
+    interceptorSession: { wait: () => Promise<any> },
+  ): Promise<void> {
+    // Inject the RAW prompt — no augmented instructions
+    this.outputChannel.info('[Interceptor] Injecting raw prompt into Copilot Chat...');
+    send('⏳ *Sending to Copilot agent...*\n\n');
+
+    vscode.commands.executeCommand('workbench.action.chat.open', {
+      query: prompt,
+      isPartialQuery: false,
+    }).then(
+      () => this.outputChannel.info('[Interceptor] Chat panel command executed'),
+      (err: any) => this.outputChannel.error(`[Interceptor] Failed to open Chat panel: ${err.message}`)
+    );
+
+    // Wait for interceptor to detect completion via debounce
+    try {
+      const result = await interceptorSession.wait();
+      this.outputChannel.info(
+        `[Interceptor] Session complete — detected ${result.documentUris.length} document URIs, ` +
+        `${result.fileChanges.length} file changes, captured ${result.capturedText.length} chars`
+      );
+
+      // If we captured chat text, it was already streamed via chunks.
+      // If not, send a summary of what the agent did.
+      if (result.capturedText.length === 0 && result.fileChanges.length > 0) {
+        const summary = result.fileChanges
+          .map((fc: any) => `• **${fc.path}** — ${fc.linesAdded} added, ${fc.linesRemoved} removed`)
+          .join('\n');
+        send(`\n\n📁 **Agent modified files:**\n${summary}`);
+      } else if (result.capturedText.length === 0 && result.fileChanges.length === 0) {
+        send('\n\n⚠️ Could not capture Copilot response. Check the Chat panel on your desktop.');
+      }
+    } catch (err: any) {
+      this.outputChannel.error(`[Interceptor] Error: ${err.message}`);
+      send(`\n\n⚠️ ${err.message}`);
+    }
   }
 
   // ─── Workspace Event Listeners ──────────────────────────────────
@@ -632,7 +852,7 @@ export class MobileCopilotServer {
             timestamp: Date.now(),
           };
           this.activityLog.push(activity);
-          this.broadcastToAuthenticated('agent.activity', activity);
+          this.sendToAllSessions('agent.activity', activity);
         }
       })
     );
@@ -652,28 +872,71 @@ export class MobileCopilotServer {
             timestamp: Date.now(),
           };
           this.activityLog.push(activity);
-          this.broadcastToAuthenticated('agent.activity', activity);
+          this.sendToAllSessions('agent.activity', activity);
         }
       })
     );
 
-    // Text document changes (agent editing files)
+    // Text document changes (agent editing files) — with diff data
     this.disposables.push(
       vscode.workspace.onDidChangeTextDocument((e) => {
+        // Log ALL document URIs for debugging chat response detection
+        if (e.contentChanges.length > 0) {
+          console.log(`[DocChange] URI: ${e.document.uri.toString()} scheme=${e.document.uri.scheme} lang=${e.document.languageId} changes=${e.contentChanges.length}`);
+          this.outputChannel.info(`[DocChange] ${e.document.uri.toString()} (scheme=${e.document.uri.scheme}, lang=${e.document.languageId})`);
+        }
+
+        // Feed into the interceptor if a session is active
+        this.interceptor.onDocumentChange(e);
+
         if (this.activityTracking && e.contentChanges.length > 0) {
-          const filePath = vscode.workspace.asRelativePath(e.document.uri);
+          const uri = e.document.uri;
+          // Skip non-file schemes (git, untitled, vscode-*, etc.) for activity tracking
+          if (uri.scheme !== 'file') return;
+
+          const filePath = vscode.workspace.asRelativePath(uri);
           // Debounce: don't send for every keystroke, only meaningful edits
           const totalCharsChanged = e.contentChanges.reduce(
             (sum, c) => sum + c.text.length + c.rangeLength, 0
           );
           if (totalCharsChanged > 5) {
+            // Track this file as modified by the agent
+            this.agentModifiedFiles.add(filePath);
+
+            // Compute structured diff info
+            let linesAdded = 0;
+            let linesRemoved = 0;
+            const changeDetails: Array<{ range: string; preview: string }> = [];
+
+            for (const change of e.contentChanges) {
+              const newLines = change.text.split('\n').length - 1;
+              const oldLines = change.range.end.line - change.range.start.line;
+              linesAdded += newLines;
+              linesRemoved += oldLines;
+
+              // Preview of the change (truncated)
+              const preview = change.text.length > 200
+                ? change.text.substring(0, 200) + '...'
+                : change.text;
+              changeDetails.push({
+                range: `L${change.range.start.line + 1}-L${change.range.end.line + 1}`,
+                preview,
+              });
+            }
+
             const activity = {
               type: 'edit',
-              detail: `Editing: ${filePath} (${e.contentChanges.length} changes)`,
+              detail: `Editing: ${filePath} (+${linesAdded} -${linesRemoved})`,
               timestamp: Date.now(),
+              diff: {
+                path: filePath,
+                linesAdded,
+                linesRemoved,
+                changes: changeDetails.slice(0, 5), // Limit to 5 changes per event
+              },
             };
             this.activityLog.push(activity);
-            this.broadcastToAuthenticated('agent.activity', activity);
+            this.sendToAllSessions('agent.activity', activity);
           }
         }
       })
@@ -687,13 +950,14 @@ export class MobileCopilotServer {
         this.broadcastToAuthenticated('file.created', { path: filePath });
 
         if (this.activityTracking) {
+          this.agentModifiedFiles.add(filePath);
           const activity = {
             type: 'file-created',
             detail: `Created: ${filePath}`,
             timestamp: Date.now(),
           };
           this.activityLog.push(activity);
-          this.broadcastToAuthenticated('agent.activity', activity);
+          this.sendToAllSessions('agent.activity', activity);
         }
       }),
       watcher.onDidChange((uri) => {
@@ -701,13 +965,14 @@ export class MobileCopilotServer {
         this.broadcastToAuthenticated('file.changed', { path: filePath });
 
         if (this.activityTracking) {
+          this.agentModifiedFiles.add(filePath);
           const activity = {
             type: 'file-changed',
             detail: `Modified: ${filePath}`,
             timestamp: Date.now(),
           };
           this.activityLog.push(activity);
-          this.broadcastToAuthenticated('agent.activity', activity);
+          this.sendToAllSessions('agent.activity', activity);
         }
       }),
       watcher.onDidDelete((uri) => {
@@ -721,7 +986,7 @@ export class MobileCopilotServer {
             timestamp: Date.now(),
           };
           this.activityLog.push(activity);
-          this.broadcastToAuthenticated('agent.activity', activity);
+          this.sendToAllSessions('agent.activity', activity);
         }
       }),
       watcher
@@ -737,7 +1002,7 @@ export class MobileCopilotServer {
             timestamp: Date.now(),
           };
           this.activityLog.push(activity);
-          this.broadcastToAuthenticated('agent.activity', activity);
+          this.sendToAllSessions('agent.activity', activity);
         }
       })
     );
@@ -753,7 +1018,7 @@ export class MobileCopilotServer {
             timestamp: Date.now(),
           };
           this.activityLog.push(activity);
-          this.broadcastToAuthenticated('agent.activity', activity);
+          this.sendToAllSessions('agent.activity', activity);
         }
       })
     );
@@ -816,6 +1081,7 @@ export class MobileCopilotServer {
 
   private activityTracking = false;
   private activityLog: Array<{ type: string; detail: string; timestamp: number }> = [];
+  private agentModifiedFiles: Set<string> = new Set();
 
   /**
    * Start tracking workspace changes as "agent activity".
@@ -833,11 +1099,150 @@ export class MobileCopilotServer {
     }, 5 * 60 * 1000);
   }
 
+  // ─── Session-aware message buffering ──────────────────────────
+
+  /**
+   * Register or update a session's WebSocket binding.
+   * Called on every successful authentication (including reconnects).
+   */
+  private registerSession(sessionId: string, ws: WebSocket): void {
+    let session = this.sessions.get(sessionId);
+    if (!session) {
+      session = { ws, eventQueue: [], lastAgentResponse: null };
+      this.sessions.set(sessionId, session);
+      this.outputChannel.info(`[Session] Created new session state: ${sessionId}`);
+    } else {
+      session.ws = ws;
+      this.outputChannel.info(`[Session] Reconnected session: ${sessionId} (${session.eventQueue.length} queued events)`);
+    }
+  }
+
+  /**
+   * Flush queued events to the client after reconnection.
+   * Also sends `session.missedResponse` if there's a completed agent response.
+   */
+  private flushSessionQueue(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.ws || session.ws.readyState !== WebSocket.OPEN) return;
+
+    // Replay queued events
+    if (session.eventQueue.length > 0) {
+      this.outputChannel.info(`[Session] Flushing ${session.eventQueue.length} queued events for ${sessionId}`);
+      for (const { method, data } of session.eventQueue) {
+        this.rpc.sendEvent(session.ws, method, data);
+      }
+      session.eventQueue = [];
+    }
+
+    // Replay missed agent response
+    if (session.lastAgentResponse && session.lastAgentResponse.content.length > 0) {
+      this.outputChannel.info(
+        `[Session] Replaying missed agent response (${session.lastAgentResponse.content.length} chars, ` +
+        `complete=${session.lastAgentResponse.complete}) for ${sessionId}`
+      );
+      this.rpc.sendEvent(session.ws, 'session.missedResponse', {
+        content: session.lastAgentResponse.content,
+        complete: session.lastAgentResponse.complete,
+        timestamp: session.lastAgentResponse.timestamp,
+      });
+      // Clear after replay so it's not sent again
+      if (session.lastAgentResponse.complete) {
+        session.lastAgentResponse = null;
+      }
+    }
+  }
+
+  /**
+   * Queue an event for a specific session. Used when the phone is disconnected
+   * but the server has messages to deliver.
+   */
+  private queueForSession(sessionId: string, method: string, data: any): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (session.eventQueue.length >= MAX_EVENT_QUEUE_SIZE) {
+      // Drop oldest to prevent unbounded growth
+      session.eventQueue.shift();
+    }
+    session.eventQueue.push({ method, data });
+  }
+
+  /**
+   * Send an event to all authenticated sessions — either directly or queued.
+   * Replaces broadcastToAuthenticated for session-aware delivery.
+   */
+  private sendToAllSessions(method: string, data: any): void {
+    // Send to connected clients directly
+    this.broadcastToAuthenticated(method, data);
+
+    // Queue for disconnected sessions
+    for (const [sessionId, session] of this.sessions) {
+      if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
+        this.queueForSession(sessionId, method, data);
+      }
+    }
+  }
+
+  /**
+   * Create a session-aware `send` callback for streaming responses.
+   * If the phone disconnects mid-stream, chunks are accumulated in
+   * the session's `lastAgentResponse` and replayed on reconnect.
+   */
+  private createSessionAwareSend(
+    originalWs: WebSocket,
+    originalSend: (chunk: string) => void,
+  ): (chunk: string) => void {
+    // Find the sessionId for this socket
+    const clientInfo = this.clients.get(originalWs);
+    const sessionId = clientInfo?.sessionId;
+
+    if (!sessionId) {
+      // No session tracking — fall back to direct send
+      return originalSend;
+    }
+
+    // Initialize the response buffer
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.lastAgentResponse = { content: '', complete: false, timestamp: Date.now() };
+    }
+
+    return (chunk: string) => {
+      const sess = this.sessions.get(sessionId);
+      if (sess?.lastAgentResponse) {
+        sess.lastAgentResponse.content += chunk;
+        sess.lastAgentResponse.timestamp = Date.now();
+      }
+
+      // Try direct send — if socket is open, it works; if not, accumulated in buffer
+      if (originalWs.readyState === WebSocket.OPEN) {
+        originalSend(chunk);
+      } else {
+        this.outputChannel.info(`[Session] Buffering ${chunk.length} chars for disconnected session ${sessionId}`);
+      }
+    };
+  }
+
+  /**
+   * Mark the current agent response as complete for a session.
+   */
+  private markAgentResponseComplete(ws: WebSocket): void {
+    const clientInfo = this.clients.get(ws);
+    const sessionId = clientInfo?.sessionId;
+    if (!sessionId) return;
+    const session = this.sessions.get(sessionId);
+    if (session?.lastAgentResponse) {
+      session.lastAgentResponse.complete = true;
+      this.outputChannel.info(`[Session] Agent response complete for ${sessionId} (${session.lastAgentResponse.content.length} chars)`);
+    }
+  }
+
   dispose(): void {
     this.stop();
+    this.interceptor.dispose();
     this.agent.dispose();
     this.tunnel.dispose();
     this.statusBarItem.dispose();
+    this.sessions.clear();
     for (const d of this.disposables) {
       d.dispose();
     }

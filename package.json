@@ -2,7 +2,7 @@
   "name": "mobile-copilot",
   "displayName": "Mobile Copilot Remote",
   "description": "Control VS Code Copilot Chat from your mobile device — full agent mode with file ops, terminal, diagnostics, and streaming chat.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "jason0960",
   "license": "MIT",
   "engines": {
@@ -19,7 +19,9 @@
     "chat",
     "agent"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "chatParticipants": [
@@ -81,6 +83,16 @@
           "type": "number",
           "default": 3600,
           "description": "Session timeout in seconds (0 = no timeout)."
+        },
+        "mobileCopilot.captureMode": {
+          "type": "string",
+          "enum": [
+            "relay",
+            "interceptor",
+            "hybrid"
+          ],
+          "default": "relay",
+          "markdownDescription": "How to capture Copilot Chat responses for the mobile client.\n- **relay**: Augments the prompt asking Copilot to write its response to a temp file (deterministic, proven).\n- **interceptor**: Monitors document change events to detect chat responses (experimental, no prompt pollution).\n- **hybrid**: Tries interceptor first, falls back to relay if no chat text is captured."
         },
         "mobileCopilot.modelFamily": {
           "type": "string",
