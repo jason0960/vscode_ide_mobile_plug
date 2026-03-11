@@ -47,6 +47,10 @@
       {
         "command": "mobile-copilot.toggleTunnel",
         "title": "Mobile Copilot: Toggle Tunnel"
+      },
+      {
+        "command": "mobile-copilot.setTunnelUrl",
+        "title": "Mobile Copilot: Set Tunnel URL"
       }
     ],
     "configuration": {

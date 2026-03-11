@@ -108,6 +108,7 @@
 
   function requestNotificationPermission() {
     if ('Notification' in window && Notification.permission === 'default') {
+      // Must be called from a user gesture on mobile browsers
       Notification.requestPermission().then((perm) => {
         console.log('[Notify] Permission:', perm);
       });
@@ -115,28 +116,49 @@
   }
 
   function notifyResponseComplete(preview) {
-    // Vibrate (short buzz)
+    // Vibrate — strong pattern so user feels it
     if (navigator.vibrate) {
-      navigator.vibrate([100, 50, 100]);
+      navigator.vibrate([200, 100, 200, 100, 200]);
     }
 
-    // Browser notification (only if page is not visible)
-    if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
-      const body = preview
-        ? preview.substring(0, 120) + (preview.length > 120 ? '...' : '')
-        : 'Response ready';
-      const n = new Notification('Copilot Response Ready', {
-        body,
-        icon: '/icons/icon-192.png',
-        tag: 'copilot-response',
-        renotify: true,
-      });
-      n.onclick = () => {
-        window.focus();
-        n.close();
-      };
-      // Auto-close after 5s
-      setTimeout(() => n.close(), 5000);
+    // Browser notification — works whether tab is visible or not on mobile
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        const body = preview
+          ? preview.replace(/[#*`_~>]/g, '').substring(0, 120) + (preview.length > 120 ? '...' : '')
+          : 'Response ready';
+        const n = new Notification('Copilot Response Ready', {
+          body,
+          icon: '/icons/icon-192.png',
+          tag: 'copilot-response',
+          renotify: true,
+          requireInteraction: true,
+        });
+        n.onclick = () => {
+          window.focus();
+          n.close();
+        };
+        // Auto-close after 8s
+        setTimeout(() => n.close(), 8000);
+      } catch (e) {
+        // Some browsers don't support Notification constructor from SW context
+        console.warn('[Notify] Notification failed:', e);
+      }
+    }
+
+    // Also try audio beep as fallback
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = 880;
+      gain.gain.value = 0.3;
+      osc.start();
+      osc.stop(ctx.currentTime + 0.15);
+    } catch (e) {
+      // AudioContext may not be available
     }
   }
 
@@ -148,6 +170,13 @@
 
     // Load chat history from localStorage
     const hasHistory = loadChatHistory();
+
+    // Render chat history immediately (even before connecting)
+    if (hasHistory) {
+      showMainScreen();
+      renderChatHistory();
+      state._historyRendered = true;
+    }
 
     // Check for pairing token in URL
     const params = new URLSearchParams(window.location.search);
@@ -173,9 +202,6 @@
         connect();
       }
     });
-
-    // Request notification permission early
-    requestNotificationPermission();
 
     // Connect
     if (state.token || state.sessionId) {
@@ -319,7 +345,7 @@
         updateIndicator('online');
         loadWorkspaceInfo();
         loadDiagnostics();
-        // Render restored chat history after auth
+        // Render restored chat history after auth (if not already rendered)
         if (state.messages.length > 0 && !state._historyRendered) {
           renderChatHistory();
           state._historyRendered = true;
@@ -425,6 +451,9 @@
 
   async function sendMessage(text) {
     if (!text.trim() || !state.authenticated) return;
+
+    // Request notification permission on first user gesture (tap/send)
+    requestNotificationPermission();
 
     // Add user message
     const userMsg = { role: 'user', content: text, timestamp: Date.now() };

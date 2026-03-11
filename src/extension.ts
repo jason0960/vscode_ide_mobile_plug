@@ -50,6 +50,21 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       await server!.toggleTunnel();
+    }),
+
+    vscode.commands.registerCommand('mobile-copilot.setTunnelUrl', async () => {
+      if (!server!.getState().running) {
+        vscode.window.showWarningMessage('Start the server first.');
+        return;
+      }
+      const url = await vscode.window.showInputBox({
+        prompt: 'Paste the forwarded URL from the Ports tab (e.g. https://xxxxx.devtunnels.ms)',
+        placeHolder: 'https://...',
+        validateInput: (v) => v && v.startsWith('https://') ? null : 'Must be an HTTPS URL',
+      });
+      if (url) {
+        await server!.setTunnelUrl(url);
+      }
     })
   );
 

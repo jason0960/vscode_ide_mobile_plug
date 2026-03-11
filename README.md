@@ -1,252 +1,319 @@
 # Mobile Copilot Remote
 
-> Use GitHub Copilot from your phone — the **real** Copilot Chat agent with full tool use, file editing, terminal access, and streaming responses, all from a mobile browser.
+> Use GitHub Copilot from your phone — the **real** Copilot Chat agent with full tool use, file editing, terminal access, and streaming responses, all from a mobile browser. **$0 additional cost.**
 
 <p align="center">
   <img src="https://img.shields.io/badge/VS%20Code-%3E%3D1.95.0-blue" alt="VS Code version" />
   <img src="https://img.shields.io/badge/GitHub%20Copilot-Required-green" alt="Copilot required" />
   <img src="https://img.shields.io/badge/License-MIT-yellow" alt="MIT License" />
-  <img src="https://img.shields.io/badge/Platform-PWA-orange" alt="PWA" />
+  <img src="https://img.shields.io/badge/Cost-Free-brightgreen" alt="Free" />
 </p>
 
 ---
 
-## How It Works
+## What You Need
 
-```
-┌──────────────────────────┐                      ┌──────────────────────────┐
-│                          │     WebSocket +       │                          │
-│    📱  Your Phone (PWA)  │  ◄──── JSON-RPC ────► │   🖥️  VS Code Desktop    │
-│                          │                       │                          │
-│  • Chat with Copilot     │                       │  • Express server (3847) │
-│  • Browse files          │   ← stream tokens →   │  • Copilot Chat relay    │
-│  • Run terminal commands │                       │  • File system agent     │
-│  • View diagnostics      │                       │  • Terminal manager      │
-│  • Check git status      │                       │  • Git integration       │
-│  • Chat history saved    │                       │  • Workspace context     │
-│                          │                       │                          │
-└──────────────────────────┘                       └──────────────────────────┘
-         ▲                                                    │
-         │                QR Code Pairing (one scan)          │
-         └────────────────────────────────────────────────────┘
-```
+Before starting, make sure you have:
 
-**Agent Mode** sends your prompt directly into the VS Code Copilot Chat panel. Copilot processes it with full tool use (file editing, search, terminal, etc.) and the response is relayed back to your phone via a file-watcher bridge. You get the **exact same response** you'd see sitting at your desk.
-
-**Chat Mode** uses the `vscode.lm` API for quick questions without tool use — fast, lightweight, good for Q&A.
+- [ ] **VS Code** ≥ 1.95.0 installed on your desktop/laptop
+- [ ] **GitHub Copilot** extension installed and signed in (requires a [Copilot subscription](https://github.com/features/copilot))
+- [ ] **Node.js** ≥ 18 installed ([download](https://nodejs.org/))
+- [ ] **Git** installed ([download](https://git-scm.com/))
+- [ ] A **smartphone** with a web browser (iPhone, Android, anything)
 
 ---
 
-## Features
+## Installation (5 minutes)
 
-| Feature | Description |
-|---------|-------------|
-| **Agent Mode** | Real Copilot Chat with full tool use — file editing, code search, terminal commands |
-| **Chat Mode** | Direct LLM access for quick questions (GPT-4o, Claude, Gemini, o-series) |
-| **Streaming Responses** | Token-by-token streaming with live markdown rendering |
-| **Chat History** | Conversations persist in localStorage across sessions and page reloads |
-| **File Browser** | Navigate, read, create, edit, and delete files from your phone |
-| **Terminal** | Run shell commands remotely |
-| **Diagnostics** | Real-time errors and warnings with badge counts |
-| **Git Integration** | Branch, status, and diffs at a glance |
-| **Notifications** | Browser notification + vibration when a response completes |
-| **QR Code Pairing** | Secure one-scan connection — no typing IPs or tokens |
-| **Auto-Reconnect** | Survives phone sleep, network drops, and tab switches |
-| **PWA** | Add to home screen — zero install, works in any mobile browser |
-| **Dark/Light Themes** | VS Code-inspired mobile UI |
-| **Tunnel Support** | Optional internet access via Cloudflare, ngrok, or VS Code dev tunnels |
+### Step 1: Clone the Repository
 
----
-
-## Quick Start
-
-### Prerequisites
-
-- **VS Code** ≥ 1.95.0
-- **GitHub Copilot** extension installed and active (valid subscription required)
-- **Node.js** ≥ 18 (for building from source)
-- Phone and computer on the **same Wi-Fi network** (for LAN mode)
-
-### 1. Install the Extension
-
-**Option A — From source:**
+Open a terminal and run:
 
 ```bash
 git clone https://github.com/jason0960/vscode_ide_mobile_plug.git
 cd vscode_ide_mobile_plug
+```
+
+### Step 2: Install Dependencies
+
+```bash
 npm install
+```
+
+### Step 3: Build the Extension
+
+```bash
 npm run build
-npx @vscode/vsce package --allow-missing-repository
-code --install-extension mobile-copilot-0.1.0.vsix
 ```
 
-**Option B — Development mode:**
+You should see output like:
+```
+dist/extension.js      39.9kb  100.0%
+[build] Copied mobile-client → dist/mobile
+[build] Done.
+```
+
+### Step 4: Package the Extension
 
 ```bash
-git clone https://github.com/jason0960/vscode_ide_mobile_plug.git
-cd vscode_ide_mobile_plug
-npm install
-# Press F5 in VS Code to launch the Extension Development Host
+npx @vscode/vsce package --allow-missing-repository
 ```
 
-### 2. Start the Server
+Type `y` if prompted. This creates `mobile-copilot-0.1.0.vsix`.
 
-Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run:
+### Step 5: Install the Extension
 
+```bash
+code --install-extension mobile-copilot-0.1.0.vsix --force
+```
+
+### Step 6: Reload VS Code
+
+Open VS Code, press `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac), type:
+```
+Developer: Reload Window
+```
+Press Enter.
+
+---
+
+## Connecting Your Phone (Same Wi-Fi)
+
+If your phone and computer are on the **same Wi-Fi network**, this is the simplest setup.
+
+### Step 1: Start the Server
+
+Press `Ctrl+Shift+P`, type:
 ```
 Mobile Copilot: Start Server
 ```
+Press Enter. A QR code panel appears.
 
-A QR code panel appears. The server starts on port **3847** by default.
+### Step 2: Scan the QR Code
 
-### 3. Connect Your Phone
+Open your phone's camera and point it at the QR code. Tap the link that appears. The Mobile Copilot web app loads in your browser.
 
-1. Open your phone's camera and scan the QR code
-2. The Mobile Copilot PWA loads in your browser
-3. (Optional) Tap "Add to Home Screen" for an app-like experience
-4. Start chatting!
+### Step 3: Start Chatting
 
-> **Tip:** Your session persists across disconnects. If your phone sleeps or loses connection, it automatically reconnects — no need to rescan the QR code.
+You're connected! Type a message and send it. The response streams in real-time from the Copilot agent on your desktop.
+
+> **Your session persists.** If your phone sleeps or loses connection, it automatically reconnects when you come back — no need to rescan the QR code.
 
 ---
 
-## Usage
+## Connecting Your Phone (Any Network — Tunnel Mode)
+
+To use Mobile Copilot from **anywhere** (different Wi-Fi, cellular data, coffee shop), set up a tunnel. This gives you an HTTPS URL that works over the internet. **Free, no account needed beyond GitHub.**
+
+### Option A: VS Code Dev Tunnels (Recommended)
+
+#### 1. Install the Remote Tunnels Extensions
+
+In VS Code, go to Extensions (`Ctrl+Shift+X`) and install:
+- **Remote - Tunnels** (`ms-vscode.remote-server`)
+- **Remote Explorer** (`ms-vscode.remote-explorer`)
+
+#### 2. Sign in with GitHub
+
+Click the **Accounts** icon (bottom-left of VS Code sidebar) → **Sign in with GitHub to use Remote Tunnels**. Authorize when prompted.
+
+#### 3. Start the Mobile Copilot Server
+
+```
+Ctrl+Shift+P → Mobile Copilot: Start Server
+```
+
+#### 4. Forward the Port
+
+Open the **Ports** tab (at the bottom of VS Code, next to the Terminal tab):
+- If port `3847` isn't listed, click **"Forward a Port"** and enter `3847`
+- Right-click port `3847` → **Port Visibility** → **Public**
+- Right-click port `3847` → **Copy Forwarded Address**
+
+#### 5. Set the Tunnel URL
+
+```
+Ctrl+Shift+P → Mobile Copilot: Set Tunnel URL
+```
+
+Paste the URL you just copied (e.g. `https://xxxxx-3847.uks1.devtunnels.ms`). Press Enter.
+
+A new QR code appears with the tunnel URL. Scan it from your phone — **works from any network worldwide.**
+
+#### Cost: **Free** (2GB/month bandwidth, more than enough for chat)
+
+---
+
+### Option B: Cloudflare Tunnel
+
+#### 1. Install cloudflared
+
+```bash
+# Linux (Debian/Ubuntu)
+sudo apt install cloudflared
+
+# Mac
+brew install cloudflared
+
+# Windows — download from https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/
+```
+
+#### 2. Configure the Setting
+
+In VS Code, press `Ctrl+Shift+P` → **Preferences: Open Settings (UI)**
+
+Search for `mobileCopilot.tunnelProvider` and change it to **`cloudflare`**
+
+#### 3. Restart the Server
+
+```
+Ctrl+Shift+P → Mobile Copilot: Stop Server
+Ctrl+Shift+P → Mobile Copilot: Start Server
+```
+
+A Cloudflare tunnel starts automatically. The QR code shows an HTTPS URL like `https://random-words.trycloudflare.com`. Scan it.
+
+#### Cost: **Free** (no account needed, random URL changes each restart)
+
+---
+
+### Option C: ngrok
+
+#### 1. Install ngrok
+
+```bash
+# Linux/Mac
+brew install ngrok
+# or download from https://ngrok.com/download
+
+# Sign up for a free account and add your auth token:
+ngrok config add-authtoken YOUR_TOKEN
+```
+
+#### 2. Configure the Setting
+
+Set `mobileCopilot.tunnelProvider` to **`ngrok`** in VS Code settings.
+
+#### 3. Restart the Server
+
+Same as Cloudflare above. QR code shows the ngrok HTTPS URL.
+
+#### Cost: **Free tier** available (limited bandwidth)
+
+---
+
+## How to Use
 
 ### Agent Mode (Default)
 
-Agent mode sends your prompt to the real Copilot Chat agent in VS Code. Copilot can:
+Agent mode gives you the **real Copilot Chat agent** — the same one that runs in the VS Code Chat panel. It can:
 
-- Edit and create files in your workspace
-- Search across your codebase
-- Run terminal commands
-- Read diagnostics and fix errors
-- Use any tools available in VS Code Copilot Chat
+- ✏️ Edit and create files in your workspace
+- 🔍 Search across your codebase
+- 🖥️ Run terminal commands
+- 🐛 Read diagnostics and fix errors
+- 🔧 Use any VS Code Copilot Chat tools
 
-Your prompt is augmented with workspace context (file tree, open editors, diagnostics, git status) so Copilot understands your project.
+**Example prompts:**
+- "Add error handling to the login function"
+- "Create a new React component for user profiles"
+- "What's the git status? Commit everything with a good message."
+- "Find and fix all TypeScript errors"
+- "Run the tests and tell me what failed"
 
 ### Chat Mode
 
-Toggle to Chat mode for quick questions that don't need tool use. Chat mode talks directly to the language model (GPT-4o, Claude, Gemini, etc.) via the `vscode.lm` API. It supports conversation history and is faster for simple Q&A.
+Toggle to **Chat** mode (tap the toggle at the top of the chat screen) for quick questions without tool use. This talks directly to the language model and is faster for simple Q&A.
 
-### Switching Modes
+**Example prompts:**
+- "Explain what this regex does: `/^[a-z]+$/i`"
+- "What's the difference between `useEffect` and `useLayoutEffect`?"
+- "Write a SQL query to find duplicate emails"
 
-Use the **Agent** / **Chat** toggle at the top of the chat panel. Your selection persists across sessions.
+### Chat History
+
+Your conversations are automatically saved to your phone's browser storage (last 200 messages). When you reopen the app — even offline — your previous conversation is still there.
+
+Tap the **New Chat** button (top of chat screen) to start fresh.
+
+### File Browser
+
+Tap the navigation menu (☰) → **Files** to browse your workspace. You can:
+- Navigate folders
+- View file contents with syntax highlighting
+- Attach files as context to your chat messages
+
+### Terminal
+
+Tap **Terminal** in the navigation menu to run commands on your desktop from your phone.
+
+### Diagnostics
+
+Tap **Diagnostics** to see all errors and warnings across your workspace. The badge shows the count.
 
 ---
 
-## Commands
+## Commands Reference
 
-| Command | Description |
+| Command | What It Does |
 |---------|-------------|
-| `Mobile Copilot: Start Server` | Start the HTTP/WebSocket server and show QR code |
+| `Mobile Copilot: Start Server` | Start the server and show QR code |
 | `Mobile Copilot: Stop Server` | Stop the server and disconnect all clients |
-| `Mobile Copilot: Show QR Code` | Re-display the pairing QR code |
-| `Mobile Copilot: Toggle Tunnel` | Enable/disable internet tunnel |
+| `Mobile Copilot: Show QR Code` | Show the QR code again (if you closed it) |
+| `Mobile Copilot: Toggle Tunnel` | Start/stop the configured tunnel |
+| `Mobile Copilot: Set Tunnel URL` | Manually paste a tunnel URL (from VS Code Ports tab) |
 
-## Settings
+## Settings Reference
 
-| Setting | Default | Description |
+| Setting | Default | What It Does |
 |---------|---------|-------------|
-| `mobileCopilot.port` | `3847` | Server port |
+| `mobileCopilot.port` | `3847` | Server port number |
 | `mobileCopilot.tunnelProvider` | `none` | `none`, `vscode`, `cloudflare`, or `ngrok` |
-| `mobileCopilot.autoStart` | `false` | Auto-start server when VS Code launches |
-| `mobileCopilot.sessionTimeout` | `3600` | Session timeout in seconds (0 = no timeout) |
-| `mobileCopilot.modelFamily` | `gpt-4o` | Preferred Copilot model family |
+| `mobileCopilot.autoStart` | `false` | Auto-start server when VS Code opens |
+| `mobileCopilot.sessionTimeout` | `3600` | Session timeout in seconds (0 = never expire) |
+| `mobileCopilot.modelFamily` | `gpt-4o` | Default model for Chat mode |
 
 ---
 
-## Architecture
+## iOS Notes
 
-### Extension (TypeScript, bundled with esbuild)
+If you're on iPhone:
 
-```
-src/
-├── extension.ts     # Entry point — registers commands, manages lifecycle
-├── server.ts        # Express HTTP + WebSocket server, RPC routing, file-relay agent
-├── auth.ts          # QR code pairing, token generation, session management
-├── rpc.ts           # JSON-RPC protocol over WebSocket (bidirectional)
-├── copilot.ts       # Bridge to vscode.lm API for Chat mode
-├── participant.ts   # @mobile chat participant with rich workspace context
-├── context.ts       # Workspace context provider (files, diagnostics, git)
-├── agent.ts         # Agent operations (file CRUD, terminal, editor, search)
-├── tunnel.ts        # Optional tunnel support (Cloudflare, ngrok, VS Code)
-└── types.ts         # Shared TypeScript types
-```
+- **Use Safari** to scan the QR code if you want to add the app to your home screen
+- **Add to Home Screen**: Safari → Share button (□↑) → "Add to Home Screen"
+- **Notifications** only work when installed as a home screen PWA on iOS 16.4+
+- **Chrome on iOS** works fine for chatting but can't add to home screen as a PWA
+- **Vibration** is not supported on any iOS browser (Apple limitation)
+- **Audio beep** plays when responses complete (make sure silent mode is off — check the physical switch on the side of your iPhone)
 
-### Mobile Client (PWA)
+## Android Notes
 
-```
-mobile-client/
-├── index.html       # App shell — chat, files, terminal, diagnostics panels
-├── app.js           # WebSocket client, UI logic, chat history, notifications
-├── styles.css       # Mobile-optimized dark/light theme CSS
-├── manifest.json    # PWA manifest for home screen install
-├── sw.js            # Service worker for offline shell caching
-├── icons/           # App icons (SVG + PNG)
-└── lib/             # Vendored: marked.js, highlight.js
-```
-
-### File-Relay Agent Mode
-
-When you send a prompt in Agent mode, the extension:
-
-1. Injects your prompt (with workspace context) into the native VS Code Copilot Chat panel
-2. Copilot processes it with full tool use (edits files, runs commands, etc.)
-3. Copilot's response is written to a temporary relay file (`.copilot-mobile-relay.md`)
-4. A `FileSystemWatcher` detects the write and streams the content back to your phone
-5. The relay file is automatically deleted after delivery
-
-This means you get the **exact same Copilot response** that appears in the desktop Chat panel.
-
-### RPC Protocol
-
-Communication uses a JSON-RPC-like protocol over WebSocket:
-
-```json
-{ "id": "msg_123", "type": "request", "method": "chat.sendToAgent", "params": { "prompt": "..." } }
-{ "id": "msg_123", "type": "stream",  "result": "Here is" }
-{ "id": "msg_123", "type": "stream",  "result": " a chunk" }
-{ "id": "msg_123", "type": "response","result": { "done": true } }
-```
-
-<details>
-<summary><strong>Full RPC Method Reference</strong></summary>
-
-| Method | Type | Description |
-|--------|------|-------------|
-| `chat.sendToAgent` | stream | Send prompt to Copilot Chat agent (Agent mode) |
-| `chat.send` | stream | Send prompt to LLM directly (Chat mode) |
-| `chat.models` | request | List available Copilot models |
-| `workspace.info` | request | Get workspace summary |
-| `workspace.fileTree` | request | Get file tree (configurable depth) |
-| `workspace.listDir` | request | List directory contents |
-| `file.read` | request | Read file contents |
-| `file.write` | request | Write file contents |
-| `file.create` | request | Create a new file |
-| `file.delete` | request | Delete a file |
-| `file.edit` | request | Find-and-replace edit |
-| `file.search` | request | Search files for text |
-| `terminal.run` | request | Run a terminal command |
-| `terminal.list` | request | List active terminals |
-| `editor.open` | request | Open a file in the editor |
-| `editor.active` | request | Get active editor info |
-| `diagnostics.all` | request | Get all diagnostics |
-| `diagnostics.summary` | request | Get error/warning counts |
-| `git.status` | request | Get git status |
-| `git.diff` | request | Get git diff |
-
-</details>
+- **Chrome** works best — supports notifications, vibration, and "Add to Home Screen"
+- When you first send a message, Chrome will ask to allow notifications — tap **Allow**
+- Vibration works out of the box
 
 ---
 
 ## Security
 
-- **Cryptographic token auth** — Random token per session, stored in VS Code's encrypted SecretStorage
+- **Your code never leaves your machine** — there is no cloud service; all communication is direct (or via your chosen tunnel)
+- **Cryptographic token auth** — Random 256-bit token per session, stored in VS Code's encrypted SecretStorage
 - **QR code pairing** — Token transmitted via QR scan, stripped from URL after pairing
 - **Session persistence** — Sessions survive disconnects; expire after configurable timeout
-- **Timing-safe comparison** — Constant-time token validation prevents timing attacks
-- **Transport** — LAN uses plain HTTP (local network); tunnel providers add automatic TLS/HTTPS
-- **No cloud relay** — All communication is direct between your phone and your machine
+- **Timing-safe comparison** — Constant-time token validation to prevent timing attacks
+- **Tunnel security** — Cloudflare/ngrok/VS Code tunnels provide automatic TLS/HTTPS encryption
+
+---
+
+## Costs
+
+| Component | Cost |
+|---|---|
+| GitHub Copilot subscription | $10–19/month (you already have this) |
+| This extension | **Free** (MIT license) |
+| VS Code Dev Tunnel | **Free** (2GB/month) |
+| Cloudflare Tunnel | **Free** (no account needed) |
+| **Additional cost** | **$0/month** |
 
 ---
 
@@ -254,18 +321,55 @@ Communication uses a JSON-RPC-like protocol over WebSocket:
 
 | Problem | Solution |
 |---------|----------|
-| QR code doesn't load | Ensure `Mobile Copilot: Start Server` is running. Check Output panel for errors. |
-| Phone can't connect | Verify both devices are on the same Wi-Fi. Try `http://<your-ip>:3847` manually. |
-| "Authentication failed" | Session expired. Run `Mobile Copilot: Show QR Code` and rescan. |
-| Agent mode gives no response | Ensure GitHub Copilot is active and signed in. Check the Chat panel in VS Code. |
-| Chat mode model error | The selected model may not be available. Try switching to `gpt-4o` in settings. |
+| QR code doesn't appear | Run `Mobile Copilot: Start Server` from the Command Palette |
+| Phone can't connect (same Wi-Fi) | Verify both devices are on the same network. Try opening `http://<your-computer-ip>:3847` in your phone's browser manually |
+| Phone can't connect (tunnel) | Check the Ports tab in VS Code — is port 3847 forwarded and set to Public? Copy the forwarded URL and use `Mobile Copilot: Set Tunnel URL` |
+| "Authentication failed" | Session expired. Run `Mobile Copilot: Show QR Code` and rescan |
+| Agent mode gives no response | Make sure GitHub Copilot is signed in and active. Check the VS Code Chat panel for errors |
+| Chat mode model error | The selected model may not be available with your subscription. Switch to `gpt-4o` |
+| No notifications on iPhone | Notifications require: (1) HTTPS tunnel, (2) Safari, (3) added to home screen, (4) iOS 16.4+ |
+| Lost chat history | Chat history is stored per-URL in your browser. If you switch between LAN and tunnel URLs, each has separate history |
+| Extension not loading after install | Run `Developer: Reload Window` from the Command Palette |
+
+---
+
+## How It Works (Technical)
+
+### Architecture
+
+```
+Your Phone (PWA)                    Your Desktop (VS Code)
+─────────────────                   ──────────────────────
+app.js                              ┌─ extension.ts (entry point)
+  ↕ WebSocket + JSON-RPC            ├─ server.ts (Express + WebSocket)
+  ↕ (direct LAN or via tunnel)      ├─ auth.ts (QR pairing, tokens)
+                                    ├─ rpc.ts (JSON-RPC protocol)
+                                    ├─ copilot.ts (vscode.lm API bridge)
+                                    ├─ participant.ts (@mobile chat participant)
+                                    ├─ context.ts (workspace context)
+                                    ├─ agent.ts (file ops, terminal, editor)
+                                    └─ tunnel.ts (Cloudflare/ngrok/VS Code)
+```
+
+### Agent Mode — File Relay
+
+1. You send a prompt from your phone
+2. The extension injects it into the native VS Code Copilot Chat panel (with workspace context)
+3. Copilot processes it with full tool use (edits files, runs commands, etc.)
+4. Copilot's response is written to `.copilot-mobile-relay.md`
+5. A FileSystemWatcher detects the write and streams content back to your phone
+6. The relay file is automatically deleted
+
+You get the **exact same Copilot response** that appears on the desktop.
 
 ---
 
 ## Development
 
 ```bash
-# Install dependencies
+# Clone and install
+git clone https://github.com/jason0960/vscode_ide_mobile_plug.git
+cd vscode_ide_mobile_plug
 npm install
 
 # Watch mode (auto-rebuild on save)
@@ -274,6 +378,7 @@ npm run watch
 # Press F5 in VS Code to launch Extension Development Host
 
 # Package for distribution
+npm run build
 npx @vscode/vsce package --allow-missing-repository
 ```
 
@@ -281,4 +386,4 @@ npx @vscode/vsce package --allow-missing-repository
 
 ## License
 
-MIT
+MIT — free to use, modify, and distribute.

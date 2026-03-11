@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mobile-copilot-v1';
+const CACHE_NAME = 'mobile-copilot-v2';
 const SHELL_ASSETS = [
   '/',
   '/index.html',

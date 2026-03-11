@@ -23,6 +23,14 @@ export class TunnelManager {
   }
 
   /**
+   * Manually set a tunnel URL (e.g. from VS Code Ports tab).
+   */
+  setManualUrl(url: string): void {
+    this.tunnelUrl = url;
+    this.outputChannel.info(`Manual tunnel URL set: ${url}`);
+  }
+
+  /**
    * Start a tunnel based on the configured provider.
    */
   async startTunnel(localPort: number): Promise<string | null> {
@@ -49,7 +57,30 @@ export class TunnelManager {
     try {
       const localUri = vscode.Uri.parse(`http://localhost:${localPort}`);
       const externalUri = await vscode.env.asExternalUri(localUri);
-      this.tunnelUrl = externalUri.toString();
+      const externalUrl = externalUri.toString().replace(/\/$/, '');
+
+      // Check if VS Code actually returned a tunnel URL (not just localhost)
+      if (externalUrl.includes('localhost') || externalUrl.includes('127.0.0.1')) {
+        this.outputChannel.warn(
+          `VS Code returned local URL: ${externalUrl}. ` +
+          `Make sure Remote Tunnels extension is installed and you're signed into GitHub. ` +
+          `Or manually forward port ${localPort} in the Ports tab and copy the forwarded URL.`
+        );
+        // Show guidance to the user
+        const action = await vscode.window.showWarningMessage(
+          `VS Code tunnel returned localhost. Port forwarding may not be active. ` +
+          `Check the Ports tab — if port ${localPort} is forwarded, copy its URL.`,
+          'Open Ports Tab',
+          'Use Local URL'
+        );
+        if (action === 'Open Ports Tab') {
+          await vscode.commands.executeCommand('workbench.panel.ports.focus');
+        }
+        // Still return null so we fall back to LAN URL
+        return null;
+      }
+
+      this.tunnelUrl = externalUrl;
       this.outputChannel.info(`VS Code tunnel active: ${this.tunnelUrl}`);
       return this.tunnelUrl;
     } catch (err: any) {

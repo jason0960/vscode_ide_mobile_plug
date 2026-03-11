@@ -142,6 +142,17 @@ export class MobileCopilotServer {
     await this.auth.showQRPanel(this.extensionContext, pairingUrl, baseUrl);
   }
 
+  /**
+   * Manually set a tunnel URL (e.g. from the Ports tab forwarded address).
+   * Regenerates the QR code with the new URL.
+   */
+  async setTunnelUrl(url: string): Promise<void> {
+    this.tunnel.setManualUrl(url.replace(/\/$/, ''));
+    this.updateStatusBar('tunnel');
+    await this.showQRCode();
+    vscode.window.showInformationMessage(`QR code updated with tunnel URL: ${url}`);
+  }
+
   async toggleTunnel(): Promise<void> {
     if (this.tunnel.isActive()) {
       this.tunnel.stopTunnel();
