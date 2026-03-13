@@ -1,0 +1,153 @@
+{
+  "name": "mobile-copilot",
+  "displayName": "Mobile Copilot Remote",
+  "description": "Control VS Code Copilot Chat from your mobile device — full agent mode with file ops, terminal, diagnostics, and streaming chat.",
+  "version": "0.2.0",
+  "publisher": "jason0960",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "copilot",
+    "mobile",
+    "remote",
+    "chat",
+    "agent"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "mobile-copilot.relay",
+        "fullName": "Mobile Copilot",
+        "name": "mobile",
+        "description": "Relay prompts from your mobile device to Copilot — responses stream back to your phone.",
+        "isSticky": true
+      }
+    ],
+    "commands": [
+      {
+        "command": "mobile-copilot.start",
+        "title": "Mobile Copilot: Start Server"
+      },
+      {
+        "command": "mobile-copilot.stop",
+        "title": "Mobile Copilot: Stop Server"
+      },
+      {
+        "command": "mobile-copilot.showQR",
+        "title": "Mobile Copilot: Show QR Code"
+      },
+      {
+        "command": "mobile-copilot.toggleTunnel",
+        "title": "Mobile Copilot: Toggle Tunnel"
+      },
+      {
+        "command": "mobile-copilot.setTunnelUrl",
+        "title": "Mobile Copilot: Set Tunnel URL"
+      },
+      {
+        "command": "mobile-copilot.connectRelay",
+        "title": "Mobile Copilot: Connect Cloud Relay"
+      },
+      {
+        "command": "mobile-copilot.disconnectRelay",
+        "title": "Mobile Copilot: Disconnect Cloud Relay"
+      }
+    ],
+    "configuration": {
+      "title": "Mobile Copilot",
+      "properties": {
+        "mobileCopilot.port": {
+          "type": "number",
+          "default": 3847,
+          "description": "Port for the mobile server."
+        },
+        "mobileCopilot.tunnelProvider": {
+          "type": "string",
+          "enum": [
+            "none",
+            "vscode",
+            "cloudflare",
+            "ngrok"
+          ],
+          "default": "none",
+          "description": "Tunnel provider for internet access."
+        },
+        "mobileCopilot.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start the mobile server when VS Code launches."
+        },
+        "mobileCopilot.sessionTimeout": {
+          "type": "number",
+          "default": 3600,
+          "description": "Session timeout in seconds (0 = no timeout)."
+        },
+        "mobileCopilot.relayUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "WebSocket URL of the cloud relay server (e.g. `wss://relay.example.com`). Leave empty to disable relay mode."
+        },
+        "mobileCopilot.captureMode": {
+          "type": "string",
+          "enum": [
+            "relay",
+            "interceptor",
+            "hybrid"
+          ],
+          "default": "relay",
+          "markdownDescription": "How to capture Copilot Chat responses for the mobile client.\n- **relay**: Augments the prompt asking Copilot to write its response to a temp file (deterministic, proven).\n- **interceptor**: Monitors document change events to detect chat responses (experimental, no prompt pollution).\n- **hybrid**: Tries interceptor first, falls back to relay if no chat text is captured."
+        },
+        "mobileCopilot.modelFamily": {
+          "type": "string",
+          "enum": [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "claude-3.5-sonnet",
+            "claude-3.7-sonnet",
+            "claude-3.7-sonnet-thought",
+            "claude-4-sonnet",
+            "claude-4-sonnet-thought",
+            "claude-4-opus",
+            "claude-4-opus-thought",
+            "o1",
+            "o1-mini",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash"
+          ],
+          "default": "gpt-4o",
+          "description": "Preferred Copilot model family."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "@mobile-copilot/protocol": "*",
+    "@mobile-copilot/adapter-core": "*",
+    "express": "^4.18.2",
+    "nanoid": "^3.3.7",
+    "qrcode": "^1.5.3",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.95.0",
+    "@types/ws": "^8.5.10"
+  }
+}

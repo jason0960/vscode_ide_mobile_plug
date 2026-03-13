@@ -24,6 +24,9 @@
     terminalHistory: [],
     chatMode: 'agent',  // 'agent' (passthrough to real Copilot Chat) or 'chat' (raw LLM)
     agentWorking: false, // True when agent is processing a passthrough request
+    relayMode: false,    // True when connected via cloud relay
+    relayUrl: null,      // Relay server WebSocket URL
+    relayCode: null,     // Room code for relay connection
   };
 
   // ─── DOM Elements ─────────────────────────────────────
@@ -71,6 +74,9 @@
     modelSelect: $('#model-select'),
     serverInfo: $('#server-info'),
     disconnectBtn: $('#disconnect-btn'),
+    relayCodeInput: $('#relay-code-input'),
+    relayConnectBtn: $('#relay-connect-btn'),
+    relayUrlInput: $('#relay-url-input'),
   };
 
   // ─── Chat History Persistence ─────────────────────────
@@ -214,7 +220,18 @@
     if (state.token || state.sessionId) {
       connect();
     } else {
-      showConnectError('Scan the QR code in VS Code to connect');
+      // Check for saved relay settings
+      const savedRelayUrl = localStorage.getItem('mc-relay-url');
+      const savedRelayCode = localStorage.getItem('mc-relay-code');
+      if (savedRelayUrl && savedRelayCode) {
+        state.relayUrl = savedRelayUrl;
+        state.relayCode = savedRelayCode;
+        if (dom.relayUrlInput) dom.relayUrlInput.value = savedRelayUrl;
+        if (dom.relayCodeInput) dom.relayCodeInput.value = savedRelayCode;
+        connectRelay(savedRelayUrl, savedRelayCode);
+      } else {
+        showConnectError('Scan the QR code or enter a room code to connect');
+      }
     }
   }
 
@@ -223,6 +240,7 @@
   function connect() {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) return;
 
+    state.relayMode = false;
     setConnectStatus('Connecting...', '');
     updateIndicator('connecting');
 
@@ -299,6 +317,116 @@
     } else {
       showConnectError('No credentials. Scan the QR code.');
     }
+  }
+
+  // ─── Relay Connection ─────────────────────────────────
+
+  function connectRelay(relayUrl, roomCode) {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      state.ws.close();
+    }
+
+    state.relayMode = true;
+    state.relayUrl = relayUrl;
+    state.relayCode = roomCode;
+    setConnectStatus('Connecting to relay...', '');
+    updateIndicator('connecting');
+
+    // Normalize URL: ensure ws:// or wss://
+    let wsBase = relayUrl.replace(/\/$/, '');
+    if (wsBase.startsWith('http://')) wsBase = 'ws://' + wsBase.slice(7);
+    else if (wsBase.startsWith('https://')) wsBase = 'wss://' + wsBase.slice(8);
+    else if (!wsBase.startsWith('ws://') && !wsBase.startsWith('wss://')) wsBase = 'wss://' + wsBase;
+
+    const wsUrl = `${wsBase}/relay/join?code=${encodeURIComponent(roomCode.toUpperCase())}`;
+    console.log('[Relay] Connecting to', wsUrl);
+
+    try {
+      state.ws = new WebSocket(wsUrl);
+    } catch (err) {
+      showConnectError('Failed to connect to relay: ' + err.message);
+      return;
+    }
+
+    state.ws.onopen = () => {
+      console.log('[Relay] Connected');
+      setConnectStatus('Connected to relay, waiting for host...', 'success');
+    };
+
+    state.ws.onmessage = (event) => {
+      const raw = event.data;
+      try {
+        const msg = JSON.parse(raw);
+
+        // Relay control messages
+        if (msg.type === 'relay.joined') {
+          console.log('[Relay] Joined room:', msg.code, 'host:', msg.hostConnected);
+          if (msg.hostConnected) {
+            setConnectStatus('Connected! Authenticating...', 'success');
+            // In relay mode, send auth — the host auto-accepts
+            sendRaw({ id: genId(), type: 'request', method: 'auth', params: { relay: true } });
+          } else {
+            setConnectStatus('Waiting for VS Code to connect...', '');
+          }
+          // Save relay settings
+          localStorage.setItem('mc-relay-url', relayUrl);
+          localStorage.setItem('mc-relay-code', roomCode);
+          return;
+        }
+
+        if (msg.type === 'event' && msg.method === 'relay.host_reconnected') {
+          console.log('[Relay] Host reconnected');
+          setConnectStatus('Host reconnected! Authenticating...', 'success');
+          sendRaw({ id: genId(), type: 'request', method: 'auth', params: { relay: true } });
+          return;
+        }
+
+        if (msg.type === 'event' && msg.method === 'relay.host_disconnected') {
+          console.log('[Relay] Host disconnected');
+          state.connected = false;
+          state.authenticated = false;
+          updateIndicator('offline');
+          setConnectStatus('VS Code disconnected. Waiting for reconnection...', 'error');
+          return;
+        }
+      } catch {
+        // Not a relay control message
+      }
+
+      // Forward all other messages to the regular handler
+      handleWsMessage(raw);
+    };
+
+    state.ws.onclose = (event) => {
+      console.log('[Relay] Closed:', event.code, event.reason);
+      state.connected = false;
+      state.authenticated = false;
+      updateIndicator('offline');
+
+      if (event.code === 4004) {
+        showConnectError('Room not found. Check the room code.');
+        localStorage.removeItem('mc-relay-code');
+        return;
+      }
+
+      if (event.code === 4008) {
+        showConnectError('Room expired. Get a new room code from VS Code.');
+        localStorage.removeItem('mc-relay-code');
+        return;
+      }
+
+      // Auto-reconnect
+      setTimeout(() => {
+        if (!state.connected && state.relayMode) {
+          setConnectStatus('Reconnecting to relay...', '');
+          connectRelay(relayUrl, roomCode);
+        }
+      }, 3000);
+    };
+
+    state.ws.onerror = () => {
+      console.log('[Relay] Error');
+    };
   }
 
   function handleWsMessage(raw) {
@@ -1765,22 +1893,71 @@
     dom.disconnectBtn.addEventListener('click', () => {
       localStorage.removeItem('mc-session');
       localStorage.removeItem('mc-token');
+      localStorage.removeItem('mc-relay-url');
+      localStorage.removeItem('mc-relay-code');
       if (state.ws) state.ws.close();
       state.connected = false;
       state.authenticated = false;
+      state.relayMode = false;
+      state.relayUrl = null;
+      state.relayCode = null;
       showConnectScreen();
-      showConnectError('Disconnected. Scan QR code to reconnect.');
+      showConnectError('Disconnected. Scan QR code or enter room code to reconnect.');
     });
 
     // Reconnect button
     dom.reconnectBtn.addEventListener('click', () => {
-      connect();
+      if (state.relayMode && state.relayUrl && state.relayCode) {
+        connectRelay(state.relayUrl, state.relayCode);
+      } else {
+        connect();
+      }
     });
+
+    // Relay connect button
+    if (dom.relayConnectBtn) {
+      dom.relayConnectBtn.addEventListener('click', () => {
+        const code = (dom.relayCodeInput.value || '').trim().toUpperCase();
+        if (!code || code.length < 4) {
+          dom.relayCodeInput.style.borderColor = 'var(--error)';
+          setTimeout(() => dom.relayCodeInput.style.borderColor = '', 2000);
+          return;
+        }
+        const relayUrl = (dom.relayUrlInput.value || '').trim();
+        if (!relayUrl) {
+          dom.relayUrlInput.style.borderColor = 'var(--error)';
+          dom.relayUrlInput.placeholder = 'Required — enter your relay server URL';
+          setTimeout(() => {
+            dom.relayUrlInput.style.borderColor = '';
+            dom.relayUrlInput.placeholder = 'Relay server URL (wss://...)';
+          }, 2000);
+          return;
+        }
+        connectRelay(relayUrl, code);
+      });
+
+      // Submit on Enter in room code input
+      dom.relayCodeInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          dom.relayConnectBtn.click();
+        }
+      });
+
+      // Load saved relay URL
+      const savedRelayUrl = localStorage.getItem('mc-relay-url');
+      if (savedRelayUrl && dom.relayUrlInput) {
+        dom.relayUrlInput.value = savedRelayUrl;
+      }
+    }
 
     // Handle visibility change for reconnection
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && !state.connected && (state.token || state.sessionId)) {
-        connect();
+      if (!document.hidden && !state.connected) {
+        if (state.relayMode && state.relayUrl && state.relayCode) {
+          connectRelay(state.relayUrl, state.relayCode);
+        } else if (state.token || state.sessionId) {
+          connect();
+        }
       }
     });
 

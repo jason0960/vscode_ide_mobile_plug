@@ -1,0 +1,9 @@
+{
+  "name": "@mobile-copilot/protocol",
+  "version": "0.1.0",
+  "description": "Portable types and JSON-RPC protocol for Mobile Copilot",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "license": "MIT",
+  "dependencies": {}
+}

@@ -1,134 +1,27 @@
 {
-  "name": "mobile-copilot",
-  "displayName": "Mobile Copilot Remote",
-  "description": "Control VS Code Copilot Chat from your mobile device — full agent mode with file ops, terminal, diagnostics, and streaming chat.",
+  "name": "mobile-copilot-monorepo",
+  "private": true,
+  "description": "Mobile Copilot — monorepo for cross-IDE mobile remote control",
   "version": "0.2.0",
-  "publisher": "jason0960",
   "license": "MIT",
-  "engines": {
-    "vscode": "^1.95.0"
-  },
-  "categories": [
-    "AI",
-    "Other"
+  "workspaces": [
+    "packages/protocol",
+    "packages/adapter-core",
+    "packages/adapter-vscode",
+    "packages/relay-server",
+    "packages/mobile-app"
   ],
-  "keywords": [
-    "copilot",
-    "mobile",
-    "remote",
-    "chat",
-    "agent"
-  ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
-  "main": "./dist/extension.js",
-  "contributes": {
-    "chatParticipants": [
-      {
-        "id": "mobile-copilot.relay",
-        "fullName": "Mobile Copilot",
-        "name": "mobile",
-        "description": "Relay prompts from your mobile device to Copilot — responses stream back to your phone.",
-        "isSticky": true
-      }
-    ],
-    "commands": [
-      {
-        "command": "mobile-copilot.start",
-        "title": "Mobile Copilot: Start Server"
-      },
-      {
-        "command": "mobile-copilot.stop",
-        "title": "Mobile Copilot: Stop Server"
-      },
-      {
-        "command": "mobile-copilot.showQR",
-        "title": "Mobile Copilot: Show QR Code"
-      },
-      {
-        "command": "mobile-copilot.toggleTunnel",
-        "title": "Mobile Copilot: Toggle Tunnel"
-      },
-      {
-        "command": "mobile-copilot.setTunnelUrl",
-        "title": "Mobile Copilot: Set Tunnel URL"
-      }
-    ],
-    "configuration": {
-      "title": "Mobile Copilot",
-      "properties": {
-        "mobileCopilot.port": {
-          "type": "number",
-          "default": 3847,
-          "description": "Port for the mobile server."
-        },
-        "mobileCopilot.tunnelProvider": {
-          "type": "string",
-          "enum": [
-            "none",
-            "vscode",
-            "cloudflare",
-            "ngrok"
-          ],
-          "default": "none",
-          "description": "Tunnel provider for internet access."
-        },
-        "mobileCopilot.autoStart": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically start the mobile server when VS Code launches."
-        },
-        "mobileCopilot.sessionTimeout": {
-          "type": "number",
-          "default": 3600,
-          "description": "Session timeout in seconds (0 = no timeout)."
-        },
-        "mobileCopilot.captureMode": {
-          "type": "string",
-          "enum": [
-            "relay",
-            "interceptor",
-            "hybrid"
-          ],
-          "default": "relay",
-          "markdownDescription": "How to capture Copilot Chat responses for the mobile client.\n- **relay**: Augments the prompt asking Copilot to write its response to a temp file (deterministic, proven).\n- **interceptor**: Monitors document change events to detect chat responses (experimental, no prompt pollution).\n- **hybrid**: Tries interceptor first, falls back to relay if no chat text is captured."
-        },
-        "mobileCopilot.modelFamily": {
-          "type": "string",
-          "enum": [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4.1",
-            "gpt-4.1-mini",
-            "gpt-4.1-nano",
-            "claude-3.5-sonnet",
-            "claude-3.7-sonnet",
-            "claude-3.7-sonnet-thought",
-            "claude-4-sonnet",
-            "claude-4-sonnet-thought",
-            "claude-4-opus",
-            "claude-4-opus-thought",
-            "o1",
-            "o1-mini",
-            "o3",
-            "o3-mini",
-            "o4-mini",
-            "gemini-2.5-pro",
-            "gemini-2.0-flash"
-          ],
-          "default": "gpt-4o",
-          "description": "Preferred Copilot model family."
-        }
-      }
-    }
-  },
   "scripts": {
-    "vscode:prepublish": "npm run build",
-    "build": "node esbuild.js",
-    "watch": "node esbuild.js --watch",
-    "lint": "eslint src/",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+    "build": "node packages/adapter-vscode/esbuild.js",
+    "build:relay": "node packages/relay-server/esbuild.js",
+    "build:all": "node packages/adapter-vscode/esbuild.js && node packages/relay-server/esbuild.js",
+    "start:relay": "node packages/relay-server/dist/index.js",
+    "start:mobile": "cd packages/mobile-app && CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start",
+    "watch": "node packages/adapter-vscode/esbuild.js --watch",
+    "typecheck": "tsc --build packages/protocol packages/adapter-core",
+    "clean": "rm -rf packages/*/dist",
+    "package": "cd packages/adapter-vscode && npx @vscode/vsce package --no-dependencies --allow-missing-repository",
+    "install-ext": "code --install-extension packages/adapter-vscode/mobile-copilot-0.2.0.vsix --force"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

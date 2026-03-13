@@ -1,0 +1,42 @@
+# Source & build tooling (bundled by esbuild)
+.vscode-test/**
+.vscode/**
+src/**
+**/*.ts
+!**/*.d.ts
+**/*.map
+tsconfig.json
+esbuild.js
+
+# Artifacts & misc
+*.vsix
+.copilot-mobile-relay.md
+README.md.bak
+package-lock.json
+**/.github/**
+
+# Trim bloat from node_modules
+**/node_modules/**/test/**
+**/node_modules/**/tests/**
+**/node_modules/**/__tests__/**
+**/node_modules/**/spec/**
+**/node_modules/**/docs/**
+**/node_modules/**/doc/**
+**/node_modules/**/example/**
+**/node_modules/**/examples/**
+**/node_modules/**/coverage/**
+**/node_modules/**/.github/**
+**/node_modules/**/benchmark/**
+**/node_modules/**/benchmarks/**
+**/node_modules/**/*.md
+**/node_modules/**/*.ts
+!**/node_modules/**/*.d.ts
+**/node_modules/**/CHANGELOG*
+**/node_modules/**/HISTORY*
+**/node_modules/**/CHANGES*
+**/node_modules/**/.travis.yml
+**/node_modules/**/.eslintrc*
+**/node_modules/**/.prettierrc*
+**/node_modules/**/tsconfig.json
+**/node_modules/**/Makefile
+**/node_modules/**/.editorconfig

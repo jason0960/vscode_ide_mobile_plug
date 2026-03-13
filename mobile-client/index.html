@@ -30,6 +30,21 @@
         <p class="subtitle">Connect to your VS Code instance</p>
         <div id="connect-status" class="connect-status">Connecting...</div>
         <button id="reconnect-btn" class="btn btn-primary" style="display:none">Reconnect</button>
+
+        <div class="relay-divider"><span>or</span></div>
+
+        <div class="relay-connect">
+          <p class="relay-label">Connect via Cloud Relay</p>
+          <div class="relay-input-row">
+            <input id="relay-code-input" type="text" maxlength="6" placeholder="ROOM CODE"
+              autocomplete="off" autocapitalize="characters" spellcheck="false" />
+            <button id="relay-connect-btn" class="btn btn-primary">Join</button>
+          </div>
+          <div id="relay-url-row" class="relay-url-row">
+            <input id="relay-url-input" type="url" placeholder="Relay server URL (wss://...)"
+              autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
       </div>
     </div>
 
