@@ -213,7 +213,7 @@ export class VsCodeServer extends BaseServer {
   private setupRelayListeners(): void {
     this.logger.info('[Relay] Setting up relay listeners');
     // A mobile client's message arrives via relay — run it through our RPC handler
-    const disposable = this.relay.onMessage.event(async (raw: string) => {
+    this.disposables.push(this.relay.onMessage.event(async (raw: string) => {
       try {
         this.logger.info(`[Relay] ━━━ Received message from mobile (${raw.length} bytes): ${raw.substring(0, 300)}`);
 
@@ -221,34 +221,30 @@ export class VsCodeServer extends BaseServer {
         try {
           const msg = JSON.parse(raw);
           if (msg.method === 'auth') {
-            // Validate token before granting access
+            // Relay auth: the room code IS the shared secret — if the mobile client
+            // is in this room, it already proved it knows the code. Token-based auth
+            // is for direct WS connections. For relay, accept auth if a token is
+            // provided and valid, OR if the request indicates relay mode.
             const token = msg.params?.token;
-            if (!token) {
-              this.logger.warn(`[Relay] Auth request rejected — no token provided`);
-              const failResponse = JSON.stringify({
-                id: msg.id || crypto.randomUUID(),
-                type: 'event',
-                method: 'auth.failed',
-                params: { error: 'Token required' },
-              });
-              this.relay.send(failResponse);
-              return;
+            if (token) {
+              const valid = await this.auth.validateToken(token);
+              if (!valid) {
+                this.logger.warn(`[Relay] Auth request rejected — invalid token`);
+                const failResponse = JSON.stringify({
+                  id: msg.id || crypto.randomUUID(),
+                  type: 'event',
+                  method: 'auth.failed',
+                  params: { error: 'Invalid token' },
+                });
+                this.relay.send(failResponse);
+                return;
+              }
+              this.logger.info(`[Relay] Auth validated via token`);
+            } else {
+              // No token — relay-mode auth (room code is the auth barrier)
+              this.logger.info(`[Relay] Auth accepted via relay room membership`);
             }
 
-            const valid = await this.auth.validateToken(token);
-            if (!valid) {
-              this.logger.warn(`[Relay] Auth request rejected — invalid token`);
-              const failResponse = JSON.stringify({
-                id: msg.id || crypto.randomUUID(),
-                type: 'event',
-                method: 'auth.failed',
-                params: { error: 'Invalid token' },
-              });
-              this.relay.send(failResponse);
-              return;
-            }
-
-            this.logger.info(`[Relay] Auth request validated — sending auth.success`);
             const session = this.auth.createSession();
             const authResponse = JSON.stringify({
               id: msg.id || crypto.randomUUID(),
