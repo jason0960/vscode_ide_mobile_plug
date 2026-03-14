@@ -121,7 +121,7 @@ export class RelayClient {
         }
 
         // Everything else is a message from a mobile client — forward to local handler
-        console.log(`[MCR-DEBUG relay-client] Firing onMessage: ${raw.substring(0, 200)}`);
+        this.logger.info(`[Relay] Forwarding message to local handler (${raw.length} bytes)`);
         this.onMessage.fire(raw);
       });
 

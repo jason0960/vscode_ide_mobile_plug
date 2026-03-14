@@ -211,10 +211,9 @@ export class VsCodeServer extends BaseServer {
    * - Disconnect → update status bar
    */
   private setupRelayListeners(): void {
-    console.log('[MCR-DEBUG] setupRelayListeners called');
     this.logger.info('[Relay] Setting up relay listeners');
     // A mobile client's message arrives via relay — run it through our RPC handler
-    const disposable = this.relay.onMessage.event((raw: string) => {
+    this.disposables.push(this.relay.onMessage.event((raw: string) => {
       try {
         this.logger.info(`[Relay] ━━━ Received message from mobile (${raw.length} bytes): ${raw.substring(0, 300)}`);
 
@@ -253,7 +252,7 @@ export class VsCodeServer extends BaseServer {
       } catch (outerErr: any) {
         this.logger.error(`[Relay] FATAL handler error: ${outerErr.message}\n${outerErr.stack}`);
       }
-    });
+    }));
 
     this.relay.onClientJoined.event(({ clientCount }) => {
       this.relayClientCount = clientCount;
@@ -767,7 +766,7 @@ export class VsCodeServer extends BaseServer {
         if (resolved) return;
         try {
           const bytes = await vscode.workspace.fs.readFile(relayUri);
-          const content = Buffer.from(bytes).toString('utf8').trim();
+          const content = Buffer.from(bytes).toString('utf8').trimEnd();
 
           if (content.length === 0) return;
           this.logger.info(`[Relay] Poll: file ${content.length} chars, sent ${sentLength}`);
@@ -848,11 +847,13 @@ export class VsCodeServer extends BaseServer {
       (err: any) => this.logger.error(`[Relay] ✗ Failed to open Chat panel: ${err.message}`)
     );
 
-    // Also log available commands for debugging
-    vscode.commands.getCommands(true).then(cmds => {
-      const chatCmds = cmds.filter(c => c.includes('chat'));
-      this.logger.info(`[Relay] Available chat commands: ${chatCmds.join(', ')}`);
-    });
+    // Log available chat commands only when debug logging is enabled
+    if (process.env.MCR_DEBUG === '1') {
+      vscode.commands.getCommands(true).then(cmds => {
+        const chatCmds = cmds.filter(c => c.includes('chat'));
+        this.logger.info(`[Relay] Available chat commands: ${chatCmds.join(', ')}`);
+      });
+    }
 
     try {
       const fullText = await relayPromise;

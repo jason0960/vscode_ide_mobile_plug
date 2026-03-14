@@ -843,7 +843,7 @@ export class MobileCopilotServer {
         if (resolved) return;
         try {
           const bytes = await vscode.workspace.fs.readFile(relayUri);
-          const content = Buffer.from(bytes).toString('utf8').trim();
+          const content = Buffer.from(bytes).toString('utf8').trimEnd();
 
           if (content.length === 0) return;
           this.outputChannel.info(`[Relay] Poll: file ${content.length} chars, sent ${sentLength}`);
