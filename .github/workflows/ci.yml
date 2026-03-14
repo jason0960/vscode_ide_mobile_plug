@@ -2,9 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main, mobile-app, testing-suite]
   pull_request:
-    branches: [main, mobile-app]
+    branches: [main, relay-main]
 
 jobs:
   test:
