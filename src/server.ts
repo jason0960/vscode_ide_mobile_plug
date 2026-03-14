@@ -777,7 +777,7 @@ export class MobileCopilotServer {
     const DONE_MARKER = '<!-- MOBILE_DONE -->';
     const TIMEOUT_MS = 180_000;
     const POLL_INTERVAL_MS = 5_000;
-    const IDLE_TIMEOUT_MS = 15_000;
+    const IDLE_TIMEOUT_MS = 90_000; // Agents pause 15-60s+ during tool calls; 90s avoids premature cutoff
 
     // Delete relay file if it exists
     try {
@@ -907,11 +907,12 @@ export class MobileCopilotServer {
     });
 
     // Inject prompt into native Copilot Chat panel
+    const mobilePrompt = `[📱 Mobile] ${prompt}`;
     this.outputChannel.info('[Relay] Injecting prompt into Copilot Chat...');
     send('⏳ *Waiting for Copilot agent response on desktop...*\n\n');
 
     vscode.commands.executeCommand('workbench.action.chat.open', {
-      query: prompt,
+      query: mobilePrompt,
       isPartialQuery: false,
     }).then(
       () => this.outputChannel.info('[Relay] Chat panel command executed'),
@@ -975,8 +976,9 @@ export class MobileCopilotServer {
     this.outputChannel.info('[Interceptor] Injecting raw prompt into Copilot Chat...');
     send('⏳ *Sending to Copilot agent...*\n\n');
 
+    const mobilePrompt = `[📱 Mobile] ${prompt}`;
     vscode.commands.executeCommand('workbench.action.chat.open', {
-      query: prompt,
+      query: mobilePrompt,
       isPartialQuery: false,
     }).then(
       () => this.outputChannel.info('[Interceptor] Chat panel command executed'),

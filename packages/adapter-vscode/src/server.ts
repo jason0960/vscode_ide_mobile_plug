@@ -700,7 +700,7 @@ export class VsCodeServer extends BaseServer {
     const DONE_MARKER = '<!-- MOBILE_DONE -->';
     const TIMEOUT_MS = 180_000;
     const POLL_INTERVAL_MS = 5_000;
-    const IDLE_TIMEOUT_MS = 15_000; // Finalize if no change for 15s after receiving content
+    const IDLE_TIMEOUT_MS = 90_000; // Agents pause 15-60s+ during tool calls; 90s avoids premature cutoff
 
     try {
       await vscode.workspace.fs.delete(relayUri);
@@ -836,11 +836,12 @@ export class VsCodeServer extends BaseServer {
 
     send('⏳ *Waiting for Copilot agent response on desktop...*\n\n');
 
+    const mobilePrompt = `[📱 Mobile] ${prompt}`;
     this.logger.info(`[Relay] ━━━ Executing workbench.action.chat.open ━━━`);
     this.logger.info(`[Relay] Prompt (first 200 chars): ${prompt.substring(0, 200)}`);
     
     vscode.commands.executeCommand('workbench.action.chat.open', {
-      query: prompt,
+      query: mobilePrompt,
       isPartialQuery: false,
     }).then(
       () => this.logger.info('[Relay] ✓ Chat panel command executed SUCCESSFULLY'),
@@ -899,8 +900,9 @@ export class VsCodeServer extends BaseServer {
   ): Promise<void> {
     send('⏳ *Sending to Copilot agent...*\n\n');
 
+    const mobilePrompt = `[📱 Mobile] ${prompt}`;
     vscode.commands.executeCommand('workbench.action.chat.open', {
-      query: prompt,
+      query: mobilePrompt,
       isPartialQuery: false,
     }).then(
       () => this.logger.info('[Interceptor] Chat panel command executed'),
