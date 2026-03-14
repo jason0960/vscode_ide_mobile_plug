@@ -112,7 +112,7 @@ export class VsCodeServer extends BaseServer {
     const provider = this.config.get<string>('tunnelProvider', 'none');
     if (provider !== 'none') {
       try {
-        const tunnelUrl = await (this.tunnel as any).startTunnel(this.port);
+        const tunnelUrl = await (this.tunnel as VsCodeTunnel).startTunnel(this.port);
         this.logger.info(`Tunnel active: ${tunnelUrl}`);
         this.updateStatusBar('tunnel');
       } catch (err: any) {
