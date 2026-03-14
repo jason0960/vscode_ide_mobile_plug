@@ -4,8 +4,12 @@
  */
 
 const Uri = {
-  file: (path: string) => ({ fsPath: path, scheme: 'file', path }),
-  parse: (s: string) => ({ fsPath: s, scheme: 'file', path: s }),
+  file: (path: string) => ({ fsPath: path, scheme: 'file', path, toString: () => `file://${path}` }),
+  parse: (s: string) => ({ fsPath: s, scheme: 'file', path: s, toString: () => s }),
+  joinPath: (base: any, ...segments: string[]) => {
+    const joined = [base.fsPath, ...segments].join('/');
+    return { fsPath: joined, scheme: 'file', path: joined, toString: () => `file://${joined}` };
+  },
 };
 
 const Range = jest.fn((startLine: number, startChar: number, endLine: number, endChar: number) => ({
@@ -49,8 +53,14 @@ const workspace = {
   getConfiguration: jest.fn(() => ({
     get: jest.fn((key: string, def?: any) => def),
   })),
-  onDidChangeTextDocument: jest.fn(),
-  onDidSaveTextDocument: jest.fn(),
+  onDidChangeTextDocument: jest.fn(() => ({ dispose: jest.fn() })),
+  onDidSaveTextDocument: jest.fn(() => ({ dispose: jest.fn() })),
+  createFileSystemWatcher: jest.fn(() => ({
+    onDidCreate: jest.fn(() => ({ dispose: jest.fn() })),
+    onDidChange: jest.fn(() => ({ dispose: jest.fn() })),
+    onDidDelete: jest.fn(() => ({ dispose: jest.fn() })),
+    dispose: jest.fn(),
+  })),
 };
 
 const window = {
@@ -65,11 +75,12 @@ const window = {
     text: '',
     tooltip: '',
     command: undefined,
+    backgroundColor: undefined,
     show: jest.fn(),
     hide: jest.fn(),
     dispose: jest.fn(),
   })),
-  showInformationMessage: jest.fn(),
+  showInformationMessage: jest.fn().mockResolvedValue(undefined),
   showWarningMessage: jest.fn(),
   showErrorMessage: jest.fn(),
   createWebviewPanel: jest.fn(() => ({
@@ -77,6 +88,8 @@ const window = {
     dispose: jest.fn(),
   })),
   terminals: [],
+  onDidChangeActiveTextEditor: jest.fn(() => ({ dispose: jest.fn() })),
+  onDidOpenTerminal: jest.fn(() => ({ dispose: jest.fn() })),
 };
 
 const commands = {
@@ -91,6 +104,7 @@ const extensions = {
 
 const languages = {
   getDiagnostics: jest.fn().mockReturnValue([]),
+  onDidChangeDiagnostics: jest.fn(() => ({ dispose: jest.fn() })),
 };
 
 const StatusBarAlignment = { Left: 1, Right: 2 };
@@ -129,6 +143,24 @@ class TabInputText {
   constructor(uri: any) { this.uri = uri; }
 }
 
+class RelativePattern {
+  base: any;
+  pattern: string;
+  constructor(base: any, pattern: string) { this.base = base; this.pattern = pattern; }
+}
+
+class ThemeColor {
+  id: string;
+  constructor(id: string) { this.id = id; }
+}
+
+const env = {
+  clipboard: {
+    writeText: jest.fn().mockResolvedValue(undefined),
+    readText: jest.fn().mockResolvedValue(''),
+  },
+};
+
 module.exports = {
   Uri,
   Range,
@@ -141,6 +173,7 @@ module.exports = {
   extensions,
   languages,
   lm,
+  env,
   StatusBarAlignment,
   DiagnosticSeverity,
   FileType,
@@ -148,4 +181,6 @@ module.exports = {
   LanguageModelError,
   CancellationTokenSource,
   TabInputText,
+  RelativePattern,
+  ThemeColor,
 };
