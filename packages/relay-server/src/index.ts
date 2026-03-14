@@ -39,7 +39,10 @@ export function generateRoomCode(existingRooms: Map<string, Room>): string {
       code += CODE_CHARS[bytes[i] % CODE_CHARS.length];
     }
     attempts++;
-  } while (existingRooms.has(code) && attempts < 100);
+    if (attempts >= 100 && existingRooms.has(code)) {
+      throw new Error('generateRoomCode: unable to generate a unique room code after 100 attempts');
+    }
+  } while (existingRooms.has(code));
   return code;
 }
 
@@ -76,6 +79,13 @@ export interface RelayServerOptions {
   maxConnectionsPerIp?: number;
   /** Connection rate window in ms (default: 60 000) */
   connectionRateWindowMs?: number;
+  /**
+   * When true, the server trusts the `x-forwarded-for` header for IP detection.
+   * Only enable this when the relay is behind a trusted reverse proxy (e.g. nginx,
+   * Caddy, a load balancer).  Defaults to false — `req.socket.remoteAddress` is
+   * used instead, which cannot be spoofed by clients.
+   */
+  trustProxy?: boolean;
 }
 
 // ─── Relay Server Instance ──────────────────────────────────────
@@ -107,6 +117,7 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
   const maxClientsPerRoom = opts.maxClientsPerRoom ?? DEFAULT_MAX_CLIENTS_PER_ROOM;
   const maxConnectionsPerIp = opts.maxConnectionsPerIp ?? DEFAULT_MAX_CONNECTIONS_PER_IP;
   const connectionRateWindowMs = opts.connectionRateWindowMs ?? DEFAULT_CONNECTION_RATE_WINDOW_MS;
+  const trustProxy = opts.trustProxy ?? false;
 
   // ─── State ──────────────────────────────────────────────────
 
@@ -159,10 +170,18 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
     while (timestamps.length > 0 && timestamps[0] <= cutoff) {
       timestamps.shift();
     }
+    // Reclaim map entry when all timestamps have expired (frees memory for idle IPs).
+    if (timestamps.length === 0) {
+      connectionTimestamps.delete(ip);
+    }
     if (timestamps.length >= maxConnectionsPerIp) {
       return true;
     }
     timestamps.push(now);
+    // If the entry was deleted above, re-register the (now non-empty) array.
+    if (!connectionTimestamps.has(ip)) {
+      connectionTimestamps.set(ip, timestamps);
+    }
     return false;
   }
 
@@ -228,7 +247,12 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     // ─── Connection rate limiting per IP ──────────────────────
-    const ip = req.headers['x-forwarded-for']?.toString().split(',')[0].trim()
+    // Only honour x-forwarded-for when the server is configured to trust a
+    // reverse proxy — otherwise a client could spoof an arbitrary IP to bypass
+    // per-IP connection limits.
+    const ip = (trustProxy
+      ? req.headers['x-forwarded-for']?.toString().split(',')[0].trim()
+      : undefined)
       || req.socket.remoteAddress
       || 'unknown';
 
@@ -540,6 +564,10 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
             if (!isAlive) {
               ws.terminate();
               alive.delete(ws);
+              // Eagerly clean up per-socket state in case the 'close' event
+              // fires late or not at all after terminate().
+              wsToRoom.delete(ws);
+              cleanupSocket(ws);
               continue;
             }
             alive.set(ws, false);
