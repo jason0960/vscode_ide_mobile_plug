@@ -307,6 +307,8 @@ export class VsCodeServer extends BaseServer {
     if (existing) return existing;
 
     const virtualWs = Object.create(null) as WebSocket;
+    // Mark as relay virtual WS for identification
+    (virtualWs as any).__isRelayVirtual = true;
     // Override send to route through relay
     virtualWs.send = ((data: string | Buffer) => {
       this.relay.send(typeof data === 'string' ? data : data.toString());
@@ -320,8 +322,8 @@ export class VsCodeServer extends BaseServer {
   }
 
   private getRelayVirtualWs(): WebSocket | null {
-    for (const [ws, info] of this.clients) {
-      if (info.sessionId === 'relay') return ws;
+    for (const [ws] of this.clients) {
+      if ((ws as any).__isRelayVirtual) return ws;
     }
     return null;
   }
