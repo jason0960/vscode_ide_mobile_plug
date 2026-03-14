@@ -1,7 +1,11 @@
 /**
  * Relay Server — integration tests
  *
- * Spins up the actual relay HTTP+WS server on a random port and tests:
+ * Imports the ACTUAL production createRelayServer() factory and tests it
+ * on a random port. No reimplementation — every line of coverage hits
+ * the real relay-server/src/index.ts code.
+ *
+ * Covers:
  * - Health endpoint
  * - /rooms endpoint (disabled → 403)
  * - Room creation via /relay/host
@@ -9,197 +13,18 @@
  * - Message forwarding: host→client, client→host
  * - Host rejoin via /relay/rejoin
  * - Host disconnect notification to clients
+ * - Client disconnect notification to host
  * - Invalid room code handling
  * - Unknown path rejection
+ * - Server capacity limits
  */
-import { createServer, IncomingMessage, Server } from 'http';
-import WebSocket, { WebSocketServer } from 'ws';
-import * as crypto from 'crypto';
-import * as url from 'url';
-
-// ─── Inline "mini relay" that mirrors production logic ──────────
-// We replicate the core relay logic here to test in isolation without
-// importing the side-effectful index.ts that binds to PORT immediately.
-// This keeps tests fast and port-collision-free.
-
-interface Room {
-  code: string;
-  hostSecret: string;
-  host: WebSocket | null;
-  clients: Set<WebSocket>;
-  createdAt: string;
-  lastActivity: string;
-  ttlMs: number;
-}
-
-const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const CODE_LENGTH = 6;
-const MAX_ROOMS = 5; // Low limit for testing capacity
-
-function generateRoomCode(rooms: Map<string, Room>): string {
-  let code: string;
-  let attempts = 0;
-  do {
-    code = '';
-    const bytes = crypto.randomBytes(CODE_LENGTH);
-    for (let i = 0; i < CODE_LENGTH; i++) {
-      code += CODE_CHARS[bytes[i] % CODE_CHARS.length];
-    }
-    attempts++;
-  } while (rooms.has(code) && attempts < 100);
-  return code;
-}
-
-function startTestRelay(): Promise<{ server: Server; port: number; rooms: Map<string, Room>; cleanup: () => void }> {
-  return new Promise((resolve) => {
-    const rooms = new Map<string, Room>();
-    const wsToRoom = new Map<WebSocket, { roomCode: string; role: 'host' | 'client' }>();
-
-    const httpServer = createServer((req, res) => {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      const parsedUrl = url.parse(req.url || '', true);
-
-      if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-      if (parsedUrl.pathname === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', rooms: rooms.size }));
-        return;
-      }
-
-      if (parsedUrl.pathname === '/rooms') {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Endpoint disabled' }));
-        return;
-      }
-
-      res.writeHead(404); res.end('Not found');
-    });
-
-    const wss = new WebSocketServer({ server: httpServer });
-
-    wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-      const parsedUrl = url.parse(req.url || '', true);
-      const pathname = parsedUrl.pathname || '';
-
-      if (pathname === '/relay/host') {
-        if (rooms.size >= MAX_ROOMS) { ws.close(4010, 'Server at capacity'); return; }
-
-        const code = generateRoomCode(rooms);
-        const hostSecret = crypto.randomBytes(16).toString('hex');
-        const room: Room = {
-          code, hostSecret, host: ws, clients: new Set(),
-          createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(),
-          ttlMs: 60_000,
-        };
-        rooms.set(code, room);
-        wsToRoom.set(ws, { roomCode: code, role: 'host' });
-
-        ws.send(JSON.stringify({ type: 'relay.room_created', code, hostSecret }));
-
-        ws.on('message', (data) => {
-          const raw = data.toString();
-          for (const client of room.clients) {
-            if (client.readyState === WebSocket.OPEN) client.send(raw);
-          }
-        });
-
-        ws.on('close', () => {
-          wsToRoom.delete(ws);
-          for (const client of room.clients) {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({
-                type: 'event', method: 'relay.host_disconnected',
-                params: {}, id: crypto.randomUUID(),
-              }));
-            }
-          }
-          room.host = null;
-        });
-        return;
-      }
-
-      if (pathname === '/relay/join') {
-        const code = (parsedUrl.query.code as string || '').toUpperCase();
-        const room = rooms.get(code);
-        if (!room) { ws.close(4004, 'Room not found'); return; }
-
-        room.clients.add(ws);
-        wsToRoom.set(ws, { roomCode: code, role: 'client' });
-
-        ws.send(JSON.stringify({
-          type: 'relay.joined', code,
-          hostConnected: room.host !== null && room.host.readyState === WebSocket.OPEN,
-        }));
-
-        if (room.host && room.host.readyState === WebSocket.OPEN) {
-          room.host.send(JSON.stringify({ type: 'relay.client_joined', clientCount: room.clients.size }));
-        }
-
-        ws.on('message', (data) => {
-          if (room.host && room.host.readyState === WebSocket.OPEN) room.host.send(data.toString());
-        });
-
-        ws.on('close', () => {
-          room.clients.delete(ws);
-          wsToRoom.delete(ws);
-          if (room.host && room.host.readyState === WebSocket.OPEN) {
-            room.host.send(JSON.stringify({ type: 'relay.client_left', clientCount: room.clients.size }));
-          }
-        });
-        return;
-      }
-
-      if (pathname === '/relay/rejoin') {
-        const code = (parsedUrl.query.code as string || '').toUpperCase();
-        const secret = parsedUrl.query.secret as string || '';
-        const room = rooms.get(code);
-
-        if (!room || room.hostSecret !== secret) { ws.close(4004, 'Invalid room or secret'); return; }
-
-        if (room.host && room.host.readyState === WebSocket.OPEN) {
-          room.host.close(4009, 'Replaced');
-        }
-
-        room.host = ws;
-        wsToRoom.set(ws, { roomCode: code, role: 'host' });
-
-        ws.send(JSON.stringify({ type: 'relay.rejoined', code, clientCount: room.clients.size }));
-
-        for (const client of room.clients) {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({
-              type: 'event', method: 'relay.host_reconnected',
-              params: {}, id: crypto.randomUUID(),
-            }));
-          }
-        }
-
-        ws.on('message', (data) => {
-          for (const client of room.clients) {
-            if (client.readyState === WebSocket.OPEN) client.send(data.toString());
-          }
-        });
-        return;
-      }
-
-      ws.close(4000, 'Unknown path');
-    });
-
-    httpServer.listen(0, () => {
-      const addr = httpServer.address() as { port: number };
-      resolve({
-        server: httpServer,
-        port: addr.port,
-        rooms,
-        cleanup: () => {
-          wss.close();
-          httpServer.close();
-        },
-      });
-    });
-  });
-}
+import WebSocket from 'ws';
+import {
+  createRelayServer,
+  generateRoomCode,
+  RelayServerInstance,
+  Room,
+} from '../src/index';
 
 // ─── Test Helpers ───────────────────────────────────────────────
 
@@ -229,7 +54,6 @@ function connectWs(port: number, path: string): Promise<BufferedWs> {
       ws,
       messages,
       waitForMessage(timeout = 5000): Promise<any> {
-        // If we already have a buffered message, return immediately
         if (messages.length > 0) {
           return Promise.resolve(messages.shift()!);
         }
@@ -260,21 +84,18 @@ function waitForClose(ws: WebSocket, timeout = 5000): Promise<{ code: number; re
 
 // ─── Tests ──────────────────────────────────────────────────────
 
-const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-describe('Relay Server', () => {
+describe('Relay Server (production code)', () => {
+  let relay: RelayServerInstance;
   let port: number;
-  let server: Server;
-  let rooms: Map<string, Room>;
-  let cleanup: () => void;
   let openSockets: WebSocket[] = [];
 
   beforeAll(async () => {
-    const relay = await startTestRelay();
-    port = relay.port;
-    server = relay.server;
-    rooms = relay.rooms;
-    cleanup = relay.cleanup;
+    relay = createRelayServer({
+      port: 0,             // random port — no collisions
+      maxRooms: 5,         // low cap for capacity tests
+      heartbeatIntervalMs: 60_000, // slow heartbeat so it doesn't interfere
+    });
+    port = await relay.start();
   });
 
   afterEach(() => {
@@ -285,11 +106,11 @@ describe('Relay Server', () => {
     }
     openSockets = [];
     // Clear rooms between tests to avoid MAX_ROOMS cap
-    rooms.clear();
+    relay.rooms.clear();
   });
 
-  afterAll(() => {
-    cleanup();
+  afterAll(async () => {
+    await relay.stop();
   });
 
   function track(b: BufferedWs): BufferedWs {
@@ -319,6 +140,11 @@ describe('Relay Server', () => {
       const res = await fetch(`http://127.0.0.1:${port}/nope`);
       expect(res.status).toBe(404);
     });
+
+    it('OPTIONS returns 204 (CORS preflight)', async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, { method: 'OPTIONS' });
+      expect(res.status).toBe(204);
+    });
   });
 
   // ─── Room Creation ────────────────────────────────────────────
@@ -337,6 +163,29 @@ describe('Relay Server', () => {
       const host = track(await connectWs(port, '/relay/host'));
       const msg = await host.waitForMessage();
       expect(msg.code).not.toMatch(/[01OI]/);
+    });
+
+    it('room actually exists in server state after creation', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const msg = await host.waitForMessage();
+      expect(relay.rooms.has(msg.code)).toBe(true);
+      const room = relay.rooms.get(msg.code)!;
+      expect(room.hostSecret).toBe(msg.hostSecret);
+      expect(room.clients.size).toBe(0);
+    });
+
+    it('rejects host when server at capacity', async () => {
+      // Fill up to maxRooms (5)
+      for (let i = 0; i < 5; i++) {
+        const h = track(await connectWs(port, '/relay/host'));
+        await h.waitForMessage();
+      }
+
+      // 6th should be rejected
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/relay/host`);
+      openSockets.push(ws);
+      const { code } = await waitForClose(ws);
+      expect(code).toBe(4010);
     });
   });
 
@@ -386,7 +235,6 @@ describe('Relay Server', () => {
       await client.waitForMessage(); // relay.joined
       await host.waitForMessage(); // relay.client_joined
 
-      // Host sends message
       host.ws.send(JSON.stringify({ type: 'request', id: 'test-1', method: 'chat.response' }));
 
       const received = await client.waitForMessage();
@@ -403,13 +251,51 @@ describe('Relay Server', () => {
       await client.waitForMessage(); // relay.joined
       await host.waitForMessage(); // relay.client_joined
 
-      // Client sends message
       client.ws.send(JSON.stringify({ type: 'request', id: 'c-1', method: 'chat.send' }));
 
       const received = await host.waitForMessage();
       expect(received.type).toBe('request');
       expect(received.id).toBe('c-1');
     });
+
+    it('host _relayTarget message is forwarded to all clients', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      host.ws.send(JSON.stringify({ _relayTarget: 'broadcast', data: 'hello' }));
+
+      const received = await client.waitForMessage();
+      expect(received._relayTarget).toBe('broadcast');
+      expect(received.data).toBe('hello');
+    });
+
+    it('client messages when host unavailable are dropped gracefully', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      // Disconnect host
+      const closeP = new Promise<void>(r => host.ws.once('close', () => r()));
+      host.ws.close();
+      await closeP;
+
+      await client.waitForMessage(); // relay.host_disconnected
+
+      // Client sends — should not throw
+      client.ws.send(JSON.stringify({ type: 'request', id: 'orphan' }));
+      // Give it a moment to process without crashing
+      await new Promise(r => setTimeout(r, 100));
+      // Server still alive — check health
+      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(res.status).toBe(200);
+    }, 10000);
   });
 
   // ─── Host Disconnect / Rejoin ─────────────────────────────────
@@ -423,7 +309,6 @@ describe('Relay Server', () => {
       await client.waitForMessage(); // relay.joined
       await host.waitForMessage(); // relay.client_joined
 
-      // Host disconnects — wait for close handshake to complete
       const closeP = new Promise<void>(r => host.ws.once('close', () => r()));
       host.ws.close();
       await closeP;
@@ -443,21 +328,18 @@ describe('Relay Server', () => {
       await client.waitForMessage(); // relay.joined
       await host.waitForMessage(); // relay.client_joined
 
-      // Host disconnects — wait for close
       const closeP = new Promise<void>(r => host.ws.once('close', () => r()));
       host.ws.close();
       await closeP;
 
       await client.waitForMessage(); // relay.host_disconnected
 
-      // Host rejoins
       const newHost = track(await connectWs(port, `/relay/rejoin?code=${code}&secret=${hostSecret}`));
       const rejoined = await newHost.waitForMessage();
       expect(rejoined.type).toBe('relay.rejoined');
       expect(rejoined.code).toBe(code);
       expect(rejoined.clientCount).toBe(1);
 
-      // Client gets host_reconnected
       const reconnected = await client.waitForMessage();
       expect(reconnected.method).toBe('relay.host_reconnected');
     }, 10000);
@@ -472,6 +354,48 @@ describe('Relay Server', () => {
       openSockets.push(badWs);
       const { code: closeCode } = await waitForClose(badWs);
       expect(closeCode).toBe(4004);
+    }, 10000);
+
+    it('rejoin replaces old host connection', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+      const { code, hostSecret } = created;
+
+      // Rejoin while old host is still connected — old host gets closed with 4009
+      const hostCloseP = waitForClose(host.ws);
+      const newHost = track(await connectWs(port, `/relay/rejoin?code=${code}&secret=${hostSecret}`));
+      const rejoined = await newHost.waitForMessage();
+      expect(rejoined.type).toBe('relay.rejoined');
+
+      const { code: oldCloseCode } = await hostCloseP;
+      expect(oldCloseCode).toBe(4009);
+    }, 10000);
+
+    it('message forwarding works after rejoin', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+      const { code, hostSecret } = created;
+
+      const client = track(await connectWs(port, `/relay/join?code=${code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      // Disconnect original host
+      const closeP = new Promise<void>(r => host.ws.once('close', () => r()));
+      host.ws.close();
+      await closeP;
+      await client.waitForMessage(); // relay.host_disconnected
+
+      // Rejoin
+      const newHost = track(await connectWs(port, `/relay/rejoin?code=${code}&secret=${hostSecret}`));
+      await newHost.waitForMessage(); // relay.rejoined
+      await client.waitForMessage(); // relay.host_reconnected
+
+      // New host sends message → client receives
+      newHost.ws.send(JSON.stringify({ type: 'test', id: 'after-rejoin' }));
+      const received = await client.waitForMessage();
+      expect(received.type).toBe('test');
+      expect(received.id).toBe('after-rejoin');
     }, 10000);
   });
 
@@ -507,7 +431,7 @@ describe('Relay Server', () => {
     });
   });
 
-  // ─── Room Code Generation ────────────────────────────────────
+  // ─── Room Code Generation (using production export) ──────────
 
   describe('generateRoomCode', () => {
     it('generates 6-char codes from safe alphabet', () => {
@@ -525,7 +449,7 @@ describe('Relay Server', () => {
       for (let i = 0; i < 20; i++) {
         const code = generateRoomCode(testRooms);
         codes.add(code);
-        testRooms.set(code, {} as Room); // occupy the code
+        testRooms.set(code, {} as Room);
       }
       expect(codes.size).toBe(20);
     });
