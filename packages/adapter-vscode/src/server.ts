@@ -214,7 +214,7 @@ export class VsCodeServer extends BaseServer {
     console.log('[MCR-DEBUG] setupRelayListeners called');
     this.logger.info('[Relay] Setting up relay listeners');
     // A mobile client's message arrives via relay — run it through our RPC handler
-    const disposable = this.relay.onMessage.event((raw: string) => {
+    const disposable = this.relay.onMessage.event(async (raw: string) => {
       try {
         this.logger.info(`[Relay] ━━━ Received message from mobile (${raw.length} bytes): ${raw.substring(0, 300)}`);
 
@@ -222,33 +222,64 @@ export class VsCodeServer extends BaseServer {
         try {
           const msg = JSON.parse(raw);
           if (msg.method === 'auth') {
-            this.logger.info(`[Relay] Auth request received — sending auth.success directly`);
+            // Validate token before granting access
+            const token = msg.params?.token;
+            if (!token) {
+              this.logger.warn(`[Relay] Auth request rejected — no token provided`);
+              const failResponse = JSON.stringify({
+                id: msg.id || crypto.randomUUID(),
+                type: 'event',
+                method: 'auth.failed',
+                params: { error: 'Token required' },
+              });
+              this.relay.send(failResponse);
+              return;
+            }
+
+            const valid = await this.auth.validateToken(token);
+            if (!valid) {
+              this.logger.warn(`[Relay] Auth request rejected — invalid token`);
+              const failResponse = JSON.stringify({
+                id: msg.id || crypto.randomUUID(),
+                type: 'event',
+                method: 'auth.failed',
+                params: { error: 'Invalid token' },
+              });
+              this.relay.send(failResponse);
+              return;
+            }
+
+            this.logger.info(`[Relay] Auth request validated — sending auth.success`);
+            const session = this.auth.createSession();
             const authResponse = JSON.stringify({
               id: msg.id || crypto.randomUUID(),
               type: 'event',
               method: 'auth.success',
-              params: { sessionId: 'relay' },
+              params: { sessionId: session.id },
             });
             this.relay.send(authResponse);
-            this.logger.info(`[Relay] auth.success sent directly: ${authResponse}`);
+            this.logger.info(`[Relay] auth.success sent: ${authResponse}`);
 
-            // Also set up the virtual WS and session for future messages
+            // Set up the virtual WS and session for future messages
             const virtualWs = this.createRelayVirtualWs();
-            this.clients.set(virtualWs, { authenticated: true, sessionId: 'relay' });
-            this.registerSession('relay', virtualWs);
+            this.clients.set(virtualWs, { authenticated: true, sessionId: session.id });
+            this.registerSession(session.id, virtualWs);
             return;
           }
         } catch {
           // Not JSON — fall through
         }
 
-        // Non-auth messages go through the RPC system
-        const virtualWs = this.createRelayVirtualWs();
-        this.clients.set(virtualWs, { authenticated: true, sessionId: 'relay' });
-        this.registerSession('relay', virtualWs);
+        // Non-auth messages — require existing authenticated relay session
+        const existingVws = this.getRelayVirtualWs();
+        const clientInfo = existingVws ? this.clients.get(existingVws) : undefined;
+        if (!existingVws || !clientInfo?.authenticated) {
+          this.logger.warn(`[Relay] Dropping non-auth message — no authenticated relay session`);
+          return;
+        }
 
         this.logger.info(`[Relay] Routing non-auth message to RPC handler`);
-        this.rpc.handleMessage(virtualWs, raw);
+        this.rpc.handleMessage(existingVws, raw);
         this.logger.info(`[Relay] rpc.handleMessage returned`);
       } catch (outerErr: any) {
         this.logger.error(`[Relay] FATAL handler error: ${outerErr.message}\n${outerErr.stack}`);
@@ -505,18 +536,21 @@ export class VsCodeServer extends BaseServer {
       const wsFolder = vscode.workspace.workspaceFolders?.[0];
       if (!wsFolder) throw new Error('No workspace folder open');
 
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const results: string[] = [];
       for (const filePath of files) {
         try {
-          const status = execSync(`git status --porcelain -- "${filePath}"`, {
+          const status = execFileSync('git', ['status', '--porcelain', '--', filePath], {
             cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
           }).trim();
           if (status.startsWith('??')) {
-            execSync(`rm -f "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+            const nodePath = require('path');
+            const absPath = nodePath.resolve(wsFolder.uri.fsPath, filePath);
+            if (!absPath.startsWith(wsFolder.uri.fsPath)) throw new Error('Path traversal blocked');
+            require('fs').unlinkSync(absPath);
           } else {
-            execSync(`git restore "${filePath}"`, { cwd: wsFolder.uri.fsPath });
-            try { execSync(`git restore --staged "${filePath}"`, { cwd: wsFolder.uri.fsPath }); } catch { /* ignore */ }
+            execFileSync('git', ['restore', '--', filePath], { cwd: wsFolder.uri.fsPath });
+            try { execFileSync('git', ['restore', '--staged', '--', filePath], { cwd: wsFolder.uri.fsPath }); } catch { /* ignore */ }
           }
           results.push(filePath);
         } catch (err: any) {
@@ -539,7 +573,7 @@ export class VsCodeServer extends BaseServer {
       const wsFolder = vscode.workspace.workspaceFolders?.[0];
       if (!wsFolder) throw new Error('No workspace folder open');
 
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const fs = require('fs');
       const nodePath = require('path');
       const os = require('os');
@@ -586,14 +620,14 @@ export class VsCodeServer extends BaseServer {
       fs.writeFileSync(tmpFile, patchLines.join('\n') + '\n');
 
       try {
-        execSync(`git apply --reverse "${tmpFile}"`, {
+        execFileSync('git', ['apply', '--reverse', tmpFile], {
           cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
         });
         return { success: true, reverted: hunkIndices.length };
       } catch (err: any) {
         // Fallback: try with --3way for better conflict handling
         try {
-          execSync(`git apply --reverse --3way "${tmpFile}"`, {
+          execFileSync('git', ['apply', '--reverse', '--3way', tmpFile], {
             cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
           });
           return { success: true, reverted: hunkIndices.length };
@@ -622,8 +656,8 @@ export class VsCodeServer extends BaseServer {
       const results: string[] = [];
       for (const filePath of filesToRestore) {
         try {
-          const { execSync } = require('child_process');
-          execSync(`git restore "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+          const { execFileSync } = require('child_process');
+          execFileSync('git', ['restore', '--', filePath], { cwd: wsFolder.uri.fsPath });
           results.push(filePath);
         } catch (err: any) {
           this.logger.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
@@ -698,9 +732,8 @@ export class VsCodeServer extends BaseServer {
     this.logger.info(`[Relay] Relay file URI: ${relayUri.toString()}`);
     this.logger.info(`[Relay] Relay file fsPath: ${relayUri.fsPath}`);
     const DONE_MARKER = '<!-- MOBILE_DONE -->';
-    const TIMEOUT_MS = 180_000;
+    const TIMEOUT_MS = 600_000; // 10 minutes — agent tasks with tool calls can be very long
     const POLL_INTERVAL_MS = 5_000;
-    const IDLE_TIMEOUT_MS = 90_000; // Agents pause 15-60s+ during tool calls; 90s avoids premature cutoff
 
     try {
       await vscode.workspace.fs.delete(relayUri);
@@ -736,32 +769,6 @@ export class VsCodeServer extends BaseServer {
         }
       }, TIMEOUT_MS);
 
-      // ── Idle timeout — finalize when no new content arrives ──
-      let idleTimer: ReturnType<typeof setTimeout> | null = null;
-      const resetIdleTimer = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        if (!hasReceivedContent) return;
-        idleTimer = setTimeout(async () => {
-          if (resolved) return;
-          // One final read to flush any remaining content
-          try {
-            const finalBytes = await vscode.workspace.fs.readFile(relayUri);
-            const finalContent = Buffer.from(finalBytes).toString('utf8').trim();
-            if (finalContent.length > sentLength) {
-              const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
-              if (remaining.length > 0) send(remaining);
-              lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
-              sentLength = finalContent.length;
-            }
-          } catch { /* ignore */ }
-          resolved = true;
-          clearTimeout(timeoutTimer);
-          clearInterval(pollTimer);
-          watcher.dispose();
-          resolve(lastContent);
-        }, IDLE_TIMEOUT_MS);
-      };
-
       // ── Core: read file, find safe break, stream only complete thoughts ──
       const checkFile = async () => {
         if (resolved) return;
@@ -781,7 +788,6 @@ export class VsCodeServer extends BaseServer {
             lastContent = finalText;
             resolved = true;
             clearTimeout(timeoutTimer);
-            if (idleTimer) clearTimeout(idleTimer);
             clearInterval(pollTimer);
             watcher.dispose();
             resolve(lastContent);
@@ -794,7 +800,6 @@ export class VsCodeServer extends BaseServer {
           }
 
           hasReceivedContent = true;
-          resetIdleTimer();
 
           // Only send up to the last safe break (complete sentence/paragraph)
           const newContent = content.substring(sentLength);
@@ -1101,20 +1106,21 @@ export class VsCodeServer extends BaseServer {
     if (!wsFolder) return [];
 
     const results: Array<{ path: string; diff: string }> = [];
-    const { execSync } = require('child_process');
+    const { execFileSync } = require('child_process');
+    const fs = require('fs');
 
     for (const filePath of files) {
       try {
         let diff = '';
         try {
-          diff = execSync(`git diff --no-color -- "${filePath}"`, {
+          diff = execFileSync('git', ['diff', '--no-color', '--', filePath], {
             cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
           }).trim();
         } catch { /* ignore */ }
 
         if (!diff) {
           try {
-            diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+            diff = execFileSync('git', ['diff', '--cached', '--no-color', '--', filePath], {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
             }).trim();
           } catch { /* ignore */ }
@@ -1122,13 +1128,13 @@ export class VsCodeServer extends BaseServer {
 
         if (!diff) {
           try {
-            const status = execSync(`git status --porcelain -- "${filePath}"`, {
+            const status = execFileSync('git', ['status', '--porcelain', '--', filePath], {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
             }).trim();
             if (status.startsWith('??') || status.startsWith('A ')) {
-              const content = execSync(`cat "${filePath}"`, {
-                cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
-              });
+              const nodePath = require('path');
+              const absPath = nodePath.resolve(wsFolder.uri.fsPath, filePath);
+              const content = fs.readFileSync(absPath, 'utf-8');
               const lines = content.split('\n');
               diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n` +
                 lines.map((l: string) => '+' + l).join('\n');
@@ -1157,10 +1163,10 @@ export class VsCodeServer extends BaseServer {
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
     if (!wsFolder) return { files: [], summary: { modified: 0, added: 0, deleted: 0, totalAdded: 0, totalRemoved: 0 } };
 
-    const { execSync } = require('child_process');
+    const { execFileSync } = require('child_process');
     let statusOutput = '';
     try {
-      statusOutput = execSync('git status --porcelain', {
+      statusOutput = execFileSync('git', ['status', '--porcelain'], {
         cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
       }).trim();
     } catch {
@@ -1189,35 +1195,35 @@ export class VsCodeServer extends BaseServer {
       try {
         if (status === 'added') {
           try {
-            const content = execSync(`cat "${filePath}"`, {
-              cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
-            });
-            const lines = content.split('\n');
-            diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n` +
-              lines.map((l: string) => '+' + l).join('\n');
+            const nodePath = require('path');
+            const absPath = nodePath.resolve(wsFolder.uri.fsPath, filePath);
+            const content = require('fs').readFileSync(absPath, 'utf-8');
+            const contentLines = content.split('\n');
+            diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${contentLines.length} @@\n` +
+              contentLines.map((l: string) => '+' + l).join('\n');
           } catch { /* ignore */ }
         } else if (status === 'deleted') {
           try {
-            diff = execSync(`git diff --no-color -- "${filePath}"`, {
+            diff = execFileSync('git', ['diff', '--no-color', '--', filePath], {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
             }).trim();
           } catch { /* ignore */ }
           if (!diff) {
             try {
-              diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+              diff = execFileSync('git', ['diff', '--cached', '--no-color', '--', filePath], {
                 cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
               }).trim();
             } catch { /* ignore */ }
           }
         } else {
           try {
-            diff = execSync(`git diff --no-color -- "${filePath}"`, {
+            diff = execFileSync('git', ['diff', '--no-color', '--', filePath], {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
             }).trim();
           } catch { /* ignore */ }
           if (!diff) {
             try {
-              diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+              diff = execFileSync('git', ['diff', '--cached', '--no-color', '--', filePath], {
                 cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
               }).trim();
             } catch { /* ignore */ }
