@@ -97,6 +97,38 @@ const StatusBarAlignment = { Left: 1, Right: 2 };
 const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
 const FileType = { Unknown: 0, File: 1, Directory: 2, SymbolicLink: 64 };
 
+// Language Model API stubs
+const lm = {
+  selectChatModels: jest.fn().mockResolvedValue([]),
+};
+
+const LanguageModelChatMessage = {
+  User: jest.fn((content: string) => ({ role: 'user', content })),
+  Assistant: jest.fn((content: string) => ({ role: 'assistant', content })),
+};
+
+class LanguageModelError extends Error {
+  code: string;
+  static NotFound = jest.fn((msg?: string) => new LanguageModelError(msg || 'NotFound', 'NotFound'));
+  static NoPermissions = jest.fn((msg?: string) => new LanguageModelError(msg || 'NoPermissions', 'NoPermissions'));
+  static Blocked = jest.fn((msg?: string) => new LanguageModelError(msg || 'Blocked', 'Blocked'));
+  constructor(message: string, code: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+const CancellationTokenSource = jest.fn(() => ({
+  token: { isCancellationRequested: false, onCancellationRequested: jest.fn() },
+  cancel: jest.fn(),
+  dispose: jest.fn(),
+}));
+
+class TabInputText {
+  uri: any;
+  constructor(uri: any) { this.uri = uri; }
+}
+
 module.exports = {
   Uri,
   Range,
@@ -108,7 +140,12 @@ module.exports = {
   commands,
   extensions,
   languages,
+  lm,
   StatusBarAlignment,
   DiagnosticSeverity,
   FileType,
+  LanguageModelChatMessage,
+  LanguageModelError,
+  CancellationTokenSource,
+  TabInputText,
 };
