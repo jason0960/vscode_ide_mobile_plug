@@ -81,17 +81,11 @@ const httpServer = createServer((req, res) => {
     return;
   }
 
-  // Room info (for debugging / admin)
+  // Room info — removed for security (was leaking room codes)
+  // Use /health for relay status monitoring instead
   if (parsedUrl.pathname === '/rooms' && req.method === 'GET') {
-    const roomList = Array.from(rooms.values()).map(r => ({
-      code: r.code,
-      hasHost: r.host !== null && r.host.readyState === WebSocket.OPEN,
-      clientCount: r.clients.size,
-      createdAt: r.createdAt,
-      lastActivity: r.lastActivity,
-    }));
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ rooms: roomList }));
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Endpoint disabled' }));
     return;
   }
 

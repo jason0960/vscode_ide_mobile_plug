@@ -580,20 +580,23 @@ export class MobileCopilotServer {
       const wsFolder = vscode.workspace.workspaceFolders?.[0];
       if (!wsFolder) throw new Error('No workspace folder open');
 
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const results: string[] = [];
       for (const filePath of files) {
         try {
           // Check if it's an untracked file (needs rm, not restore)
-          const status = execSync(`git status --porcelain -- "${filePath}"`, {
+          const status = execFileSync('git', ['status', '--porcelain', '--', filePath], {
             cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
           }).trim();
           if (status.startsWith('??')) {
-            execSync(`rm -f "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+            const nodePath = require('path');
+            const absPath = nodePath.resolve(wsFolder.uri.fsPath, filePath);
+            if (!absPath.startsWith(wsFolder.uri.fsPath)) throw new Error('Path traversal blocked');
+            require('fs').unlinkSync(absPath);
           } else {
-            execSync(`git restore "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+            execFileSync('git', ['restore', '--', filePath], { cwd: wsFolder.uri.fsPath });
             // Also unstage if staged
-            try { execSync(`git restore --staged "${filePath}"`, { cwd: wsFolder.uri.fsPath }); } catch { /* ignore */ }
+            try { execFileSync('git', ['restore', '--staged', '--', filePath], { cwd: wsFolder.uri.fsPath }); } catch { /* ignore */ }
           }
           results.push(filePath);
         } catch (err: any) {
@@ -616,7 +619,7 @@ export class MobileCopilotServer {
       const wsFolder = vscode.workspace.workspaceFolders?.[0];
       if (!wsFolder) throw new Error('No workspace folder open');
 
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const fs = require('fs');
       const nodePath = require('path');
       const os = require('os');
@@ -663,14 +666,14 @@ export class MobileCopilotServer {
       fs.writeFileSync(tmpFile, patchLines.join('\n') + '\n');
 
       try {
-        execSync(`git apply --reverse "${tmpFile}"`, {
+        execFileSync('git', ['apply', '--reverse', tmpFile], {
           cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
         });
         return { success: true, reverted: hunkIndices.length };
       } catch (err: any) {
         // Fallback: try with --3way for better conflict handling
         try {
-          execSync(`git apply --reverse --3way "${tmpFile}"`, {
+          execFileSync('git', ['apply', '--reverse', '--3way', tmpFile], {
             cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
           });
           return { success: true, reverted: hunkIndices.length };
@@ -701,8 +704,8 @@ export class MobileCopilotServer {
       const results: string[] = [];
       for (const filePath of filesToRestore) {
         try {
-          const { execSync } = require('child_process');
-          execSync(`git restore "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+          const { execFileSync } = require('child_process');
+          execFileSync('git', ['restore', '--', filePath], { cwd: wsFolder.uri.fsPath });
           results.push(filePath);
         } catch (err: any) {
           this.outputChannel.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
@@ -775,9 +778,8 @@ export class MobileCopilotServer {
     const RELAY_FILENAME = '.copilot-mobile-relay.md';
     const relayUri = vscode.Uri.joinPath(wsFolder.uri, RELAY_FILENAME);
     const DONE_MARKER = '<!-- MOBILE_DONE -->';
-    const TIMEOUT_MS = 180_000;
+    const TIMEOUT_MS = 600_000; // 10 minutes — agent tasks with tool calls can be very long
     const POLL_INTERVAL_MS = 5_000;
-    const IDLE_TIMEOUT_MS = 90_000; // Agents pause 15-60s+ during tool calls; 90s avoids premature cutoff
 
     // Delete relay file if it exists
     try {
@@ -812,32 +814,6 @@ export class MobileCopilotServer {
         }
       }, TIMEOUT_MS);
 
-      // ── Idle timeout — finalize when no new content arrives ──
-      let idleTimer: ReturnType<typeof setTimeout> | null = null;
-      const resetIdleTimer = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        if (!hasReceivedContent) return;
-        idleTimer = setTimeout(async () => {
-          if (resolved) return;
-          try {
-            const finalBytes = await vscode.workspace.fs.readFile(relayUri);
-            const finalContent = Buffer.from(finalBytes).toString('utf8').trim();
-            if (finalContent.length > sentLength) {
-              const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
-              if (remaining.length > 0) send(remaining);
-              lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
-              sentLength = finalContent.length;
-            }
-          } catch { /* ignore */ }
-          resolved = true;
-          clearTimeout(timeoutTimer);
-          clearInterval(pollTimer);
-          watcher.dispose();
-          this.outputChannel.info('[Relay] Idle timeout — assuming done');
-          resolve(lastContent);
-        }, IDLE_TIMEOUT_MS);
-      };
-
       // ── Core: read file, find safe break, stream only complete thoughts ──
       const checkFile = async () => {
         if (resolved) return;
@@ -857,7 +833,6 @@ export class MobileCopilotServer {
             lastContent = finalText;
             resolved = true;
             clearTimeout(timeoutTimer);
-            if (idleTimer) clearTimeout(idleTimer);
             clearInterval(pollTimer);
             watcher.dispose();
             this.outputChannel.info('[Relay] DONE marker detected');
@@ -868,7 +843,6 @@ export class MobileCopilotServer {
           if (content.length <= sentLength) return;
 
           hasReceivedContent = true;
-          resetIdleTimer();
 
           // Only send up to the last safe break (complete sentence/paragraph)
           const newContent = content.substring(sentLength);
@@ -1408,14 +1382,14 @@ export class MobileCopilotServer {
     if (!wsFolder) return [];
 
     const results: Array<{ path: string; diff: string }> = [];
-    const { execSync } = require('child_process');
+    const { execFileSync } = require('child_process');
 
     for (const filePath of files) {
       try {
         // Try staged diff first, then unstaged
         let diff = '';
         try {
-          diff = execSync(`git diff --no-color -- "${filePath}"`, {
+          diff = execFileSync('git', ['diff', '--no-color', '--', filePath], {
             cwd: wsFolder.uri.fsPath,
             encoding: 'utf-8',
             maxBuffer: 1024 * 256,
@@ -1424,7 +1398,7 @@ export class MobileCopilotServer {
 
         if (!diff) {
           try {
-            diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+            diff = execFileSync('git', ['diff', '--cached', '--no-color', '--', filePath], {
               cwd: wsFolder.uri.fsPath,
               encoding: 'utf-8',
               maxBuffer: 1024 * 256,
@@ -1435,16 +1409,13 @@ export class MobileCopilotServer {
         // For new untracked files, show entire content as added
         if (!diff) {
           try {
-            const status = execSync(`git status --porcelain -- "${filePath}"`, {
+            const status = execFileSync('git', ['status', '--porcelain', '--', filePath], {
               cwd: wsFolder.uri.fsPath,
               encoding: 'utf-8',
             }).trim();
             if (status.startsWith('??') || status.startsWith('A ')) {
-              const content = execSync(`cat "${filePath}"`, {
-                cwd: wsFolder.uri.fsPath,
-                encoding: 'utf-8',
-                maxBuffer: 1024 * 256,
-              });
+              const absPath = require('path').resolve(wsFolder.uri.fsPath, filePath);
+              const content = require('fs').readFileSync(absPath, 'utf-8');
               const lines = content.split('\n');
               diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n` +
                 lines.map((l: string) => '+' + l).join('\n');
@@ -1479,10 +1450,10 @@ export class MobileCopilotServer {
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
     if (!wsFolder) return { files: [], summary: { modified: 0, added: 0, deleted: 0, totalAdded: 0, totalRemoved: 0 } };
 
-    const { execSync } = require('child_process');
+    const { execFileSync: execFileSyncWT } = require('child_process');
     let statusOutput = '';
     try {
-      statusOutput = execSync('git status --porcelain', {
+      statusOutput = execFileSyncWT('git', ['status', '--porcelain'], {
         cwd: wsFolder.uri.fsPath,
         encoding: 'utf-8',
         maxBuffer: 1024 * 256,
@@ -1516,22 +1487,21 @@ export class MobileCopilotServer {
         if (status === 'added') {
           // Untracked or newly added — show full content as added
           try {
-            const content = execSync(`cat "${filePath}"`, {
-              cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
-            });
+            const absPath = require('path').resolve(wsFolder.uri.fsPath, filePath);
+            const content = require('fs').readFileSync(absPath, 'utf-8');
             const lines = content.split('\n');
             diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n` +
               lines.map((l: string) => '+' + l).join('\n');
           } catch { /* ignore */ }
         } else if (status === 'deleted') {
           try {
-            diff = execSync(`git diff --no-color -- "${filePath}"`, {
+            diff = execFileSyncWT('git', ['diff', '--no-color', '--', filePath], {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
             }).trim();
           } catch { /* ignore */ }
           if (!diff) {
             try {
-              diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+              diff = execFileSyncWT('git', ['diff', '--cached', '--no-color', '--', filePath], {
                 cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
               }).trim();
             } catch { /* ignore */ }
@@ -1539,13 +1509,13 @@ export class MobileCopilotServer {
         } else {
           // Modified — try unstaged then staged
           try {
-            diff = execSync(`git diff --no-color -- "${filePath}"`, {
+            diff = execFileSyncWT('git', ['diff', '--no-color', '--', filePath], {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
             }).trim();
           } catch { /* ignore */ }
           if (!diff) {
             try {
-              diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
+              diff = execFileSyncWT('git', ['diff', '--cached', '--no-color', '--', filePath], {
                 cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
               }).trim();
             } catch { /* ignore */ }
