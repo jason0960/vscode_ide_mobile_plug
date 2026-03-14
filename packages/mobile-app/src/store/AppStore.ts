@@ -52,6 +52,13 @@ export type ChatMode = 'agent' | 'chat';
 
 // ─── Store Interface ────────────────────────────────────
 
+/**
+ * Default relay server URL.
+ * Override at build time: EXPO_PUBLIC_RELAY_URL=wss://relay.example.com
+ * Override at runtime: Settings screen.
+ */
+const DEFAULT_RELAY_SERVER = process.env.EXPO_PUBLIC_RELAY_URL || 'ws://localhost:4800';
+
 interface AppState {
   // Connection
   connectionStatus: ConnectionStatus;
@@ -60,6 +67,9 @@ interface AppState {
   relayUrl: string | null;
   relayCode: string | null;
   connectionError: string | null;
+
+  /** App-level relay server URL (persisted in settings). */
+  relayServerUrl: string;
 
   // Chat
   messages: ChatMessage[];
@@ -99,9 +109,13 @@ interface AppState {
   setDiagnosticsSummary: (summary: { errors: number; warnings: number }) => void;
 
   setTheme: (theme: ThemeMode) => void;
+  setRelayServerUrl: (url: string) => void;
 
   // Complex actions
   connectDirect: (url: string, token: string) => void;
+  /** Connect via relay using only a room code (uses app-level relayServerUrl). */
+  connectRelayWithCode: (code: string) => void;
+  /** Connect via relay with explicit URL + code (used by auto-reconnect). */
   connectRelay: (relayUrl: string, code: string) => void;
   disconnect: () => void;
   sendChatMessage: (text: string) => Promise<void>;
@@ -113,6 +127,7 @@ interface AppState {
   runTerminalCommand: (command: string) => Promise<{ output: string; exitCode?: number }>;
   loadChanges: () => Promise<{ files: GitChange[]; summary: any }>;
   restoreFiles: (files: string[]) => Promise<any>;
+  revertHunks: (filePath: string, hunkIndices: number[], diff: string) => Promise<any>;
 
   // Persistence
   saveCredentials: () => Promise<void>;
@@ -200,6 +215,8 @@ export const useAppStore = create<AppState>((set, get) => {
     relayCode: null,
     connectionError: null,
 
+    relayServerUrl: DEFAULT_RELAY_SERVER,
+
     messages: [],
     chatMode: 'agent',
     selectedModel: 'gpt-4o',
@@ -249,11 +266,22 @@ export const useAppStore = create<AppState>((set, get) => {
       AsyncStorage.setItem('mc-theme', theme).catch(() => {});
     },
 
+    setRelayServerUrl: (url) => {
+      set({ relayServerUrl: url });
+      AsyncStorage.setItem('mc-relay-server', url).catch(() => {});
+    },
+
     // ─── Complex Actions ────────────────────────────────
 
     connectDirect: (url, token) => {
       set({ token, connectionError: null });
       connectionManager.connectDirect(url, token);
+    },
+
+    connectRelayWithCode: (code) => {
+      const relayUrl = get().relayServerUrl;
+      set({ relayUrl, relayCode: code, connectionError: null });
+      connectionManager.connectRelay(relayUrl, code);
     },
 
     connectRelay: (relayUrl, code) => {
@@ -416,6 +444,10 @@ export const useAppStore = create<AppState>((set, get) => {
       return await rpcClient.request('git.restoreFiles', { files });
     },
 
+    revertHunks: async (filePath: string, hunkIndices: number[], diff: string) => {
+      return await rpcClient.request('git.revertHunks', { filePath, hunkIndices, diff });
+    },
+
     // ─── Persistence ────────────────────────────────────
 
     saveCredentials: async () => {
@@ -434,7 +466,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     loadCredentials: async () => {
       try {
-        const keys = ['mc-session', 'mc-token', 'mc-relay-url', 'mc-relay-code', 'mc-theme', 'mc-mode', 'mc-model'];
+        const keys = ['mc-session', 'mc-token', 'mc-relay-url', 'mc-relay-code', 'mc-theme', 'mc-mode', 'mc-model', 'mc-relay-server'];
         const values = await Promise.all(keys.map((k) => AsyncStorage.getItem(k)));
         const map: Record<string, string> = {};
         keys.forEach((k, i) => { if (values[i] !== null) map[k] = values[i]!; });
@@ -444,6 +476,7 @@ export const useAppStore = create<AppState>((set, get) => {
           token: map['mc-token'] || null,
           relayUrl: map['mc-relay-url'] || null,
           relayCode: map['mc-relay-code'] || null,
+          relayServerUrl: map['mc-relay-server'] || DEFAULT_RELAY_SERVER,
           theme: (map['mc-theme'] as ThemeMode) || 'dark',
           chatMode: (map['mc-mode'] as ChatMode) || 'agent',
           selectedModel: map['mc-model'] || 'gpt-4o',
