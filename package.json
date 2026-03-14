@@ -19,18 +19,25 @@
     "start:mobile": "cd packages/mobile-app && CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start",
     "watch": "node packages/adapter-vscode/esbuild.js --watch",
     "typecheck": "tsc --build packages/protocol packages/adapter-core",
+    "test": "jest --verbose",
+    "test:coverage": "jest --verbose --coverage",
+    "test:watch": "jest --watch",
     "clean": "rm -rf packages/*/dist",
     "package": "cd packages/adapter-vscode && npx @vscode/vsce package --no-dependencies --allow-missing-repository",
     "install-ext": "code --install-extension packages/adapter-vscode/mobile-copilot-0.2.0.vsix --force"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
+    "@types/jest": "^30.0.0",
     "@types/node": "^20.11.0",
+    "@types/supertest": "^7.2.0",
     "@types/vscode": "^1.95.0",
     "@types/ws": "^8.5.10",
     "esbuild": "^0.20.0",
     "eslint": "^8.56.0",
     "jest": "^29.7.0",
+    "supertest": "^7.2.2",
+    "ts-jest": "^29.4.6",
     "typescript": "^5.3.3"
   },
   "dependencies": {
@@ -38,5 +45,10 @@
     "nanoid": "^3.3.7",
     "qrcode": "^1.5.3",
     "ws": "^8.16.0"
+  },
+  "overrides": {
+    "react-native-markdown-display": {
+      "markdown-it": "^12.3.2"
+    }
   }
 }
