@@ -11,25 +11,38 @@ import {
   ScrollView,
   StyleSheet,
   ActivityIndicator,
+  RefreshControl,
+  Platform,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useAppStore, FileInfo } from '../store/AppStore';
 import { Colors, Spacing, FontSize, BorderRadius } from '../theme';
+import { SyntaxHighlighter, DARK_SYNTAX, LIGHT_SYNTAX } from '../components/SyntaxHighlighter';
 
-const FILE_ICONS: Record<string, string> = {
-  ts: '🟦', tsx: '⚛️', js: '🟨', jsx: '⚛️',
-  py: '🐍', rb: '💎', go: '🔵', rs: '🦀',
-  java: '☕', kt: '🟪', cs: '🟩', cpp: '🔧', c: '🔧', h: '🔧',
-  html: '🌐', css: '🎨', scss: '🎨', json: '📋',
-  yaml: '📋', yml: '📋', md: '📝', sh: '🖥️',
-  sql: '🗃️', xml: '📄', svg: '🖼️',
-  png: '🖼️', jpg: '🖼️', gif: '🖼️',
-  lock: '🔒', gitignore: '🚫',
+/** Map file extensions to Ionicons icon names and colors */
+const FILE_ICON_MAP: Record<string, { icon: string; color: string }> = {
+  ts: { icon: 'logo-javascript', color: '#3178c6' },
+  tsx: { icon: 'logo-react', color: '#61dafb' },
+  js: { icon: 'logo-javascript', color: '#f7df1e' },
+  jsx: { icon: 'logo-react', color: '#61dafb' },
+  py: { icon: 'logo-python', color: '#3776ab' },
+  json: { icon: 'code-slash-outline', color: '#f7df1e' },
+  md: { icon: 'document-text-outline', color: '#8b949e' },
+  html: { icon: 'logo-html5', color: '#e34f26' },
+  css: { icon: 'logo-css3', color: '#1572b6' },
+  scss: { icon: 'logo-css3', color: '#cd6799' },
+  yaml: { icon: 'settings-outline', color: '#cb171e' },
+  yml: { icon: 'settings-outline', color: '#cb171e' },
+  sh: { icon: 'terminal-outline', color: '#3fb950' },
+  sql: { icon: 'server-outline', color: '#336791' },
+  lock: { icon: 'lock-closed-outline', color: '#8b949e' },
+  gitignore: { icon: 'logo-github', color: '#8b949e' },
 };
 
-function getIcon(name: string, isDir: boolean): string {
-  if (isDir) return '📁';
+function getFileIcon(name: string, isDir: boolean): { icon: string; color: string } {
+  if (isDir) return { icon: 'folder', color: '#58a6ff' };
   const ext = name.split('.').pop()?.toLowerCase() || '';
-  return FILE_ICONS[ext] || '📄';
+  return FILE_ICON_MAP[ext] || { icon: 'document-outline', color: '#8b949e' };
 }
 
 export default function FilesScreen() {
@@ -91,7 +104,8 @@ export default function FilesScreen() {
       <View style={[styles.container, { backgroundColor: colors.background }]}>
         <View style={[styles.toolbar, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
           <TouchableOpacity onPress={goBack} style={styles.backBtn}>
-            <Text style={[styles.backText, { color: colors.primary }]}>← Back</Text>
+            <Ionicons name="chevron-back" size={20} color={colors.primary} />
+            <Text style={[styles.backText, { color: colors.primary }]}>Back</Text>
           </TouchableOpacity>
           <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={1}>
             {viewingFile.name}
@@ -102,7 +116,12 @@ export default function FilesScreen() {
         ) : (
           <ScrollView style={styles.codeScroll} horizontal>
             <ScrollView>
-              <Text style={[styles.code, { color: colors.codeText }]}>{viewingFile.content}</Text>
+              <SyntaxHighlighter
+                code={viewingFile.content}
+                theme={theme === 'dark' ? DARK_SYNTAX : LIGHT_SYNTAX}
+                showLineNumbers
+                maxLines={2000}
+              />
             </ScrollView>
           </ScrollView>
         )}
@@ -112,28 +131,32 @@ export default function FilesScreen() {
 
   // ─── File Browser ─────────────────────────────────────
 
-  const renderItem = ({ item }: { item: FileInfo }) => (
-    <TouchableOpacity
-      style={[styles.fileItem, { borderBottomColor: colors.border }]}
-      onPress={() => item.isDirectory ? loadDir(item.path) : openFile(item.path, item.name)}
-    >
-      <Text style={styles.fileIcon}>{getIcon(item.name, item.isDirectory)}</Text>
-      <Text style={[
-        styles.fileItemName,
-        { color: colors.text },
-        item.isDirectory && { fontWeight: '600' },
-      ]} numberOfLines={1}>
-        {item.name}
-      </Text>
-    </TouchableOpacity>
-  );
+  const renderItem = ({ item }: { item: FileInfo }) => {
+    const fi = getFileIcon(item.name, item.isDirectory);
+    return (
+      <TouchableOpacity
+        style={[styles.fileItem, { borderBottomColor: colors.border }]}
+        onPress={() => item.isDirectory ? loadDir(item.path) : openFile(item.path, item.name)}
+      >
+        <Ionicons name={fi.icon as any} size={20} color={fi.color} style={styles.fileIcon} />
+        <Text style={[
+          styles.fileItemName,
+          { color: colors.text },
+          item.isDirectory && { fontWeight: '600' },
+        ]} numberOfLines={1}>
+          {item.name}
+        </Text>
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <View style={[styles.toolbar, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
         {currentPath ? (
           <TouchableOpacity onPress={goBack} style={styles.backBtn}>
-            <Text style={[styles.backText, { color: colors.primary }]}>← Back</Text>
+            <Ionicons name="chevron-back" size={20} color={colors.primary} />
+            <Text style={[styles.backText, { color: colors.primary }]}>Back</Text>
           </TouchableOpacity>
         ) : (
           <View style={styles.backBtn} />
@@ -142,7 +165,7 @@ export default function FilesScreen() {
           {currentPath || '/'}
         </Text>
         <TouchableOpacity onPress={() => loadDir(currentPath)} style={styles.refreshBtn}>
-          <Text style={[styles.refreshText, { color: colors.primary }]}>↻</Text>
+          <Ionicons name="refresh" size={20} color={colors.primary} />
         </TouchableOpacity>
       </View>
 
@@ -160,6 +183,14 @@ export default function FilesScreen() {
           renderItem={renderItem}
           keyExtractor={(item) => item.path}
           showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={loading}
+              onRefresh={() => loadDir(currentPath)}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          }
         />
       )}
     </View>
@@ -175,12 +206,11 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.sm,
     borderBottomWidth: 1,
   },
-  backBtn: { minWidth: 60 },
+  backBtn: { minWidth: 60, flexDirection: 'row', alignItems: 'center', gap: 2 },
   backText: { fontSize: FontSize.md, fontWeight: '600' },
   pathText: { flex: 1, fontSize: FontSize.sm, textAlign: 'center' },
   fileName: { flex: 1, fontSize: FontSize.md, fontWeight: '600', textAlign: 'center' },
-  refreshBtn: { minWidth: 40, alignItems: 'flex-end' },
-  refreshText: { fontSize: 24 },
+  refreshBtn: { minWidth: 44, height: 44, alignItems: 'flex-end', justifyContent: 'center' },
   fileItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -189,7 +219,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     gap: Spacing.md,
   },
-  fileIcon: { fontSize: 20, width: 28 },
+  fileIcon: { width: 28, textAlign: 'center' },
   fileItemName: { flex: 1, fontSize: FontSize.md },
   emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   emptyText: { fontSize: FontSize.md },
@@ -200,6 +230,3 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
 });
-
-// Platform import needed for font
-import { Platform } from 'react-native';
