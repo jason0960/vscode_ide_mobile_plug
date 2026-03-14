@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import WebSocket = require('ws');
 import { BaseServer } from '@mobile-copilot/adapter-core';
 import type { ILogger } from '@mobile-copilot/adapter-core';
@@ -210,31 +211,48 @@ export class VsCodeServer extends BaseServer {
    * - Disconnect → update status bar
    */
   private setupRelayListeners(): void {
+    console.log('[MCR-DEBUG] setupRelayListeners called');
+    this.logger.info('[Relay] Setting up relay listeners');
     // A mobile client's message arrives via relay — run it through our RPC handler
-    this.relay.onMessage.event((raw: string) => {
-      // Create a virtual WebSocket-like object so the RPC handler can respond
-      // Responses are sent back through the relay
-      const virtualWs = this.createRelayVirtualWs();
-
-      // Mark as authenticated (relay handles its own room auth)
-      this.clients.set(virtualWs, { authenticated: true, sessionId: 'relay' });
-      this.registerSession('relay', virtualWs);
-
-      // Check if this is an auth message from the mobile client
+    const disposable = this.relay.onMessage.event((raw: string) => {
       try {
-        const msg = JSON.parse(raw);
-        if (msg.method === 'auth') {
-          // Auto-authenticate and send success
-          this.rpc.sendEvent(virtualWs, 'auth.success', {
-            sessionId: 'relay',
-          });
-          return;
-        }
-      } catch {
-        // Not JSON — forward to RPC
-      }
+        this.logger.info(`[Relay] ━━━ Received message from mobile (${raw.length} bytes): ${raw.substring(0, 300)}`);
 
-      this.rpc.handleMessage(virtualWs, raw);
+        // Handle auth directly — bypass virtual WS / RPC for this one message
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.method === 'auth') {
+            this.logger.info(`[Relay] Auth request received — sending auth.success directly`);
+            const authResponse = JSON.stringify({
+              id: msg.id || crypto.randomUUID(),
+              type: 'event',
+              method: 'auth.success',
+              params: { sessionId: 'relay' },
+            });
+            this.relay.send(authResponse);
+            this.logger.info(`[Relay] auth.success sent directly: ${authResponse}`);
+
+            // Also set up the virtual WS and session for future messages
+            const virtualWs = this.createRelayVirtualWs();
+            this.clients.set(virtualWs, { authenticated: true, sessionId: 'relay' });
+            this.registerSession('relay', virtualWs);
+            return;
+          }
+        } catch {
+          // Not JSON — fall through
+        }
+
+        // Non-auth messages go through the RPC system
+        const virtualWs = this.createRelayVirtualWs();
+        this.clients.set(virtualWs, { authenticated: true, sessionId: 'relay' });
+        this.registerSession('relay', virtualWs);
+
+        this.logger.info(`[Relay] Routing non-auth message to RPC handler`);
+        this.rpc.handleMessage(virtualWs, raw);
+        this.logger.info(`[Relay] rpc.handleMessage returned`);
+      } catch (outerErr: any) {
+        this.logger.error(`[Relay] FATAL handler error: ${outerErr.message}\n${outerErr.stack}`);
+      }
     });
 
     this.relay.onClientJoined.event(({ clientCount }) => {
@@ -262,15 +280,15 @@ export class VsCodeServer extends BaseServer {
     const existing = this.getRelayVirtualWs();
     if (existing) return existing;
 
-    const virtualWs = Object.create(WebSocket.prototype) as WebSocket;
+    const virtualWs = Object.create(null) as WebSocket;
     // Override send to route through relay
-    (virtualWs as any).send = (data: string | Buffer) => {
+    virtualWs.send = ((data: string | Buffer) => {
       this.relay.send(typeof data === 'string' ? data : data.toString());
-    };
-    (virtualWs as any).readyState = WebSocket.OPEN;
-    // Make readyState dynamic
+    }) as any;
+    // Dynamic readyState based on relay connection
     Object.defineProperty(virtualWs, 'readyState', {
       get: () => this.relay.isConnected ? WebSocket.OPEN : WebSocket.CLOSED,
+      configurable: true,
     });
     return virtualWs;
   }
@@ -300,9 +318,12 @@ export class VsCodeServer extends BaseServer {
 
     this.rpc.onStream('chat.sendToAgent', async (params, rawSend, ws) => {
       const { prompt } = params as { prompt: string };
-      this.logger.info(`[Agent] Received prompt from mobile: "${prompt?.substring(0, 80)}"`);
+      this.logger.info(`[Agent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      this.logger.info(`[Agent] Received prompt from mobile: "${prompt?.substring(0, 120)}"`);
+      this.logger.info(`[Agent] WS type: ${typeof ws}, has send: ${typeof (ws as any)?.send}`);
 
       if (!prompt || !prompt.trim()) {
+        this.logger.error('[Agent] Empty prompt received!');
         throw new Error('Prompt is required');
       }
 
@@ -311,11 +332,15 @@ export class VsCodeServer extends BaseServer {
       this.sendToAllSessions('agent.status', { status: 'running', timestamp: Date.now() });
       this.startActivityTracking();
 
-      const wsFolder = vscode.workspace.workspaceFolders?.[0];
+      const allFolders = vscode.workspace.workspaceFolders;
+      this.logger.info(`[Agent] Workspace folders: ${allFolders ? allFolders.map(f => f.uri.fsPath).join(', ') : 'NONE'}`);
+      const wsFolder = allFolders?.[0];
       if (!wsFolder) {
+        this.logger.error('[Agent] No workspace folder open!');
         this.sendToAllSessions('agent.status', { status: 'failed', error: 'No workspace folder open', timestamp: Date.now() });
         throw new Error('No workspace folder open');
       }
+      this.logger.info(`[Agent] Using workspace folder: ${wsFolder.uri.fsPath}`);
 
       try {
         const captureMode = this.config.get<string>('captureMode', 'relay');
@@ -501,6 +526,86 @@ export class VsCodeServer extends BaseServer {
       return { restored: results.length, files: results };
     });
 
+    // Selectively revert specific diff hunks from a file
+    this.rpc.onRequest('git.revertHunks', async (params) => {
+      const filePath = params?.filePath as string;
+      const hunkIndices = params?.hunkIndices as number[];
+      const fullDiff = params?.diff as string;
+
+      if (!filePath || !hunkIndices?.length || !fullDiff) {
+        return { success: false, message: 'Missing required parameters (filePath, hunkIndices, diff)' };
+      }
+
+      const wsFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!wsFolder) throw new Error('No workspace folder open');
+
+      const { execSync } = require('child_process');
+      const fs = require('fs');
+      const nodePath = require('path');
+      const os = require('os');
+
+      // Parse the unified diff into header lines + individual hunks
+      const lines = fullDiff.split('\n');
+      const headerLines: string[] = [];
+      const hunks: { header: string; lines: string[] }[] = [];
+      let currentHunk: { header: string; lines: string[] } | null = null;
+
+      for (const line of lines) {
+        if (line.startsWith('@@')) {
+          if (currentHunk) hunks.push(currentHunk);
+          currentHunk = { header: line, lines: [] };
+        } else if (currentHunk) {
+          currentHunk.lines.push(line);
+        } else {
+          headerLines.push(line);
+        }
+      }
+      if (currentHunk) hunks.push(currentHunk);
+
+      // Ensure we have a valid diff --git header for git apply
+      if (!headerLines.some(l => l.startsWith('diff --git'))) {
+        headerLines.unshift(`diff --git a/${filePath} b/${filePath}`);
+      }
+      if (!headerLines.some(l => l.startsWith('---'))) {
+        headerLines.push(`--- a/${filePath}`);
+      }
+      if (!headerLines.some(l => l.startsWith('+++'))) {
+        headerLines.push(`+++ b/${filePath}`);
+      }
+
+      // Build a patch containing only the hunks to revert
+      const patchLines = [...headerLines];
+      for (const idx of hunkIndices) {
+        if (idx >= 0 && idx < hunks.length) {
+          patchLines.push(hunks[idx].header);
+          patchLines.push(...hunks[idx].lines);
+        }
+      }
+
+      const tmpFile = nodePath.join(os.tmpdir(), `mobile-copilot-revert-${Date.now()}.patch`);
+      fs.writeFileSync(tmpFile, patchLines.join('\n') + '\n');
+
+      try {
+        execSync(`git apply --reverse "${tmpFile}"`, {
+          cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
+        });
+        return { success: true, reverted: hunkIndices.length };
+      } catch (err: any) {
+        // Fallback: try with --3way for better conflict handling
+        try {
+          execSync(`git apply --reverse --3way "${tmpFile}"`, {
+            cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
+          });
+          return { success: true, reverted: hunkIndices.length };
+        } catch (err2: any) {
+          this.logger.warn(`[Git] revertHunks failed for ${filePath}: ${err2.message}`);
+          return { success: false, message: `Failed to revert hunks: ${err2.message}` };
+        }
+      } finally {
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+      }
+    });
+
     this.rpc.onRequest('git.restoreChanges', async (params) => {
       const files = params?.files as string[] | undefined;
       const filesToRestore = files && files.length > 0
@@ -547,43 +652,78 @@ export class VsCodeServer extends BaseServer {
 
   // ─── Capture Strategies ─────────────────────────────────────────
 
+  /**
+   * Find the last "safe" break point — end of a complete sentence, paragraph,
+   * or code block — so we never stream a half-finished thought to mobile.
+   * Returns the index (exclusive) up to which the content is safe to send.
+   */
+  private findSafeBreak(text: string): number {
+    if (text.length === 0) return 0;
+
+    // If the text ends with a code fence close, it's a complete block
+    const lastFenceClose = text.lastIndexOf('\n```\n');
+    const lastDoubleLF = text.lastIndexOf('\n\n');
+    const lastSentenceEnd = Math.max(
+      text.lastIndexOf('. '),
+      text.lastIndexOf('.\n'),
+      text.lastIndexOf('!\n'),
+      text.lastIndexOf('?\n'),
+      text.lastIndexOf(':\n'),
+    );
+    // Prefer paragraph breaks > code fence close > sentence-ending punctuation
+    const breakIdx = Math.max(lastDoubleLF, lastFenceClose, lastSentenceEnd);
+
+    if (breakIdx <= 0) return 0; // no safe break found — hold everything
+
+    // Include the break character(s) themselves
+    if (text[breakIdx] === '\n' && breakIdx + 1 < text.length && text[breakIdx + 1] === '\n') {
+      return breakIdx + 2;
+    }
+    if (text[breakIdx] === '\n') return breakIdx + 1;
+    // For ". " or ".\n" etc, include the punctuation + whitespace
+    return breakIdx + 2;
+  }
+
   private async runRelayCapture(
     prompt: string,
     wsFolder: vscode.WorkspaceFolder,
     send: (chunk: string) => void,
     hybridInterceptorSession: { wait: () => Promise<any> } | null,
   ): Promise<void> {
+    this.logger.info(`[Relay] ━━━ runRelayCapture START ━━━`);
+    this.logger.info(`[Relay] Workspace folder: ${wsFolder.uri.fsPath}`);
+    this.logger.info(`[Relay] Prompt length: ${prompt.length}`);
     const RELAY_FILENAME = '.copilot-mobile-relay.md';
     const relayUri = vscode.Uri.joinPath(wsFolder.uri, RELAY_FILENAME);
+    this.logger.info(`[Relay] Relay file URI: ${relayUri.toString()}`);
+    this.logger.info(`[Relay] Relay file fsPath: ${relayUri.fsPath}`);
     const DONE_MARKER = '<!-- MOBILE_DONE -->';
     const TIMEOUT_MS = 180_000;
-    const DEBOUNCE_MS = 4_000;
+    const POLL_INTERVAL_MS = 5_000;
+    const IDLE_TIMEOUT_MS = 15_000; // Finalize if no change for 15s after receiving content
 
     try {
       await vscode.workspace.fs.delete(relayUri);
-    } catch { /* ignore */ }
+      this.logger.info('[Relay] Deleted existing relay file');
+    } catch {
+      this.logger.info('[Relay] No existing relay file to delete (OK)');
+    }
 
-    const augmentedPrompt =
-      prompt + '\n\n' +
-      '--- IMPORTANT INSTRUCTION ---\n' +
-      `After your response, also write your COMPLETE chat response (what you just said above) ` +
-      `as markdown into the workspace file \`${RELAY_FILENAME}\`. ` +
-      `This is to relay your answer to a mobile client that cannot see the chat panel. ` +
-      `End the file content with exactly this marker on its own line: ${DONE_MARKER}\n` +
-      'Copy your full response including explanations, code blocks, and formatting. ' +
-      'Do NOT skip this step.';
+    // The relay file instruction is handled by .github/copilot-instructions.md
+    // (injected as system context by VS Code). No prompt augmentation needed.
 
-    let lastContent = '';
     let sentLength = 0;
+    let lastContent = '';
     let hasReceivedContent = false;
 
     const relayPromise = new Promise<string>((resolve, reject) => {
-      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
       let resolved = false;
 
+      // ── Absolute timeout — safety net ──
       const timeoutTimer = setTimeout(() => {
         if (!resolved) {
           resolved = true;
+          clearInterval(pollTimer);
           watcher.dispose();
           if (lastContent.length > 0) {
             resolve(lastContent);
@@ -596,9 +736,33 @@ export class VsCodeServer extends BaseServer {
         }
       }, TIMEOUT_MS);
 
-      const pattern = new vscode.RelativePattern(wsFolder, RELAY_FILENAME);
-      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+      // ── Idle timeout — finalize when no new content arrives ──
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      const resetIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (!hasReceivedContent) return;
+        idleTimer = setTimeout(async () => {
+          if (resolved) return;
+          // One final read to flush any remaining content
+          try {
+            const finalBytes = await vscode.workspace.fs.readFile(relayUri);
+            const finalContent = Buffer.from(finalBytes).toString('utf8').trim();
+            if (finalContent.length > sentLength) {
+              const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
+              if (remaining.length > 0) send(remaining);
+              lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
+              sentLength = finalContent.length;
+            }
+          } catch { /* ignore */ }
+          resolved = true;
+          clearTimeout(timeoutTimer);
+          clearInterval(pollTimer);
+          watcher.dispose();
+          resolve(lastContent);
+        }, IDLE_TIMEOUT_MS);
+      };
 
+      // ── Core: read file, find safe break, stream only complete thoughts ──
       const checkFile = async () => {
         if (resolved) return;
         try {
@@ -606,66 +770,88 @@ export class VsCodeServer extends BaseServer {
           const content = Buffer.from(bytes).toString('utf8').trim();
 
           if (content.length === 0) return;
+          this.logger.info(`[Relay] Poll: file ${content.length} chars, sent ${sentLength}`);
 
-          if (content.length > sentLength) {
-            let newContent = content.substring(sentLength);
-            const cleanContent = newContent.replace(DONE_MARKER, '').trimEnd();
-            if (cleanContent.length > 0) {
-              hasReceivedContent = true;
-              send(cleanContent);
-            }
-            sentLength = content.length;
-            lastContent = content.replace(DONE_MARKER, '').trimEnd();
-          }
-
+          // Check for DONE marker → flush everything
           if (content.includes(DONE_MARKER)) {
+            const finalText = content.replace(DONE_MARKER, '').trimEnd();
+            if (finalText.length > sentLength) {
+              send(finalText.substring(sentLength));
+            }
+            lastContent = finalText;
             resolved = true;
             clearTimeout(timeoutTimer);
-            if (debounceTimer) clearTimeout(debounceTimer);
+            if (idleTimer) clearTimeout(idleTimer);
+            clearInterval(pollTimer);
             watcher.dispose();
             resolve(lastContent);
             return;
           }
 
-          if (hasReceivedContent) {
-            if (debounceTimer) clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(async () => {
-              if (!resolved) {
-                try {
-                  const finalBytes = await vscode.workspace.fs.readFile(relayUri);
-                  const finalContent = Buffer.from(finalBytes).toString('utf8');
-                  if (finalContent.length > sentLength) {
-                    const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
-                    if (remaining.length > 0) send(remaining);
-                    lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
-                  }
-                } catch { /* ignore */ }
+          // New content available?
+          if (content.length <= sentLength) {
+            return;
+          }
 
-                resolved = true;
-                clearTimeout(timeoutTimer);
-                watcher.dispose();
-                resolve(lastContent);
-              }
-            }, DEBOUNCE_MS);
+          hasReceivedContent = true;
+          resetIdleTimer();
+
+          // Only send up to the last safe break (complete sentence/paragraph)
+          const newContent = content.substring(sentLength);
+          const safeIdx = this.findSafeBreak(newContent);
+
+          if (safeIdx > 0) {
+            const safeChunk = newContent.substring(0, safeIdx);
+            send(safeChunk);
+            sentLength += safeIdx;
+            lastContent = content.substring(0, sentLength);
+            this.logger.info(`[Relay] Streamed ${safeChunk.length} chars (safe break). Total sent: ${sentLength}`);
+          } else {
+            this.logger.info(`[Relay] No safe break in ${newContent.length} new chars — holding`);
           }
         } catch (err: any) {
           this.logger.warn(`[Relay] Error reading file: ${err.message}`);
         }
       };
 
-      watcher.onDidChange(checkFile);
-      watcher.onDidCreate(checkFile);
+      // ── File watcher — react to file changes but throttle via the poll timer ──
+      const pattern = new vscode.RelativePattern(wsFolder, RELAY_FILENAME);
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+
+      // Trigger an immediate check when the file first appears or changes
+      let lastWatcherCheck = 0;
+      const throttledCheck = () => {
+        const now = Date.now();
+        // Don't check more often than every 2 seconds from watcher events
+        if (now - lastWatcherCheck < 2_000) return;
+        lastWatcherCheck = now;
+        checkFile();
+      };
+      watcher.onDidChange(throttledCheck);
+      watcher.onDidCreate(throttledCheck);
+
+      // ── Poll every POLL_INTERVAL_MS as the primary streaming mechanism ──
+      const pollTimer = setInterval(checkFile, POLL_INTERVAL_MS);
     });
 
     send('⏳ *Waiting for Copilot agent response on desktop...*\n\n');
 
+    this.logger.info(`[Relay] ━━━ Executing workbench.action.chat.open ━━━`);
+    this.logger.info(`[Relay] Prompt (first 200 chars): ${prompt.substring(0, 200)}`);
+    
     vscode.commands.executeCommand('workbench.action.chat.open', {
-      query: augmentedPrompt,
+      query: prompt,
       isPartialQuery: false,
     }).then(
-      () => this.logger.info('[Relay] Chat panel command executed'),
-      (err: any) => this.logger.error(`[Relay] Failed to open Chat panel: ${err.message}`)
+      () => this.logger.info('[Relay] ✓ Chat panel command executed SUCCESSFULLY'),
+      (err: any) => this.logger.error(`[Relay] ✗ Failed to open Chat panel: ${err.message}`)
     );
+
+    // Also log available commands for debugging
+    vscode.commands.getCommands(true).then(cmds => {
+      const chatCmds = cmds.filter(c => c.includes('chat'));
+      this.logger.info(`[Relay] Available chat commands: ${chatCmds.join(', ')}`);
+    });
 
     try {
       const fullText = await relayPromise;

@@ -603,6 +603,86 @@ export class MobileCopilotServer {
       return { restored: results.length, files: results };
     });
 
+    // Selectively revert specific diff hunks from a file
+    this.rpc.onRequest('git.revertHunks', async (params) => {
+      const filePath = params?.filePath as string;
+      const hunkIndices = params?.hunkIndices as number[];
+      const fullDiff = params?.diff as string;
+
+      if (!filePath || !hunkIndices?.length || !fullDiff) {
+        return { success: false, message: 'Missing required parameters (filePath, hunkIndices, diff)' };
+      }
+
+      const wsFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!wsFolder) throw new Error('No workspace folder open');
+
+      const { execSync } = require('child_process');
+      const fs = require('fs');
+      const nodePath = require('path');
+      const os = require('os');
+
+      // Parse the unified diff into header lines + individual hunks
+      const lines = fullDiff.split('\n');
+      const headerLines: string[] = [];
+      const hunks: { header: string; lines: string[] }[] = [];
+      let currentHunk: { header: string; lines: string[] } | null = null;
+
+      for (const line of lines) {
+        if (line.startsWith('@@')) {
+          if (currentHunk) hunks.push(currentHunk);
+          currentHunk = { header: line, lines: [] };
+        } else if (currentHunk) {
+          currentHunk.lines.push(line);
+        } else {
+          headerLines.push(line);
+        }
+      }
+      if (currentHunk) hunks.push(currentHunk);
+
+      // Ensure we have a valid diff --git header for git apply
+      if (!headerLines.some(l => l.startsWith('diff --git'))) {
+        headerLines.unshift(`diff --git a/${filePath} b/${filePath}`);
+      }
+      if (!headerLines.some(l => l.startsWith('---'))) {
+        headerLines.push(`--- a/${filePath}`);
+      }
+      if (!headerLines.some(l => l.startsWith('+++'))) {
+        headerLines.push(`+++ b/${filePath}`);
+      }
+
+      // Build a patch containing only the hunks to revert
+      const patchLines = [...headerLines];
+      for (const idx of hunkIndices) {
+        if (idx >= 0 && idx < hunks.length) {
+          patchLines.push(hunks[idx].header);
+          patchLines.push(...hunks[idx].lines);
+        }
+      }
+
+      const tmpFile = nodePath.join(os.tmpdir(), `mobile-copilot-revert-${Date.now()}.patch`);
+      fs.writeFileSync(tmpFile, patchLines.join('\n') + '\n');
+
+      try {
+        execSync(`git apply --reverse "${tmpFile}"`, {
+          cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
+        });
+        return { success: true, reverted: hunkIndices.length };
+      } catch (err: any) {
+        // Fallback: try with --3way for better conflict handling
+        try {
+          execSync(`git apply --reverse --3way "${tmpFile}"`, {
+            cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
+          });
+          return { success: true, reverted: hunkIndices.length };
+        } catch (err2: any) {
+          this.outputChannel.warn(`[Git] revertHunks failed for ${filePath}: ${err2.message}`);
+          return { success: false, message: `Failed to revert hunks: ${err2.message}` };
+        }
+      } finally {
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+      }
+    });
+
     // Revert agent changes — restores files modified during last agent run
     this.rpc.onRequest('git.restoreChanges', async (params) => {
       const files = params?.files as string[] | undefined;
@@ -653,10 +733,38 @@ export class MobileCopilotServer {
   // ─── Capture Strategies ─────────────────────────────────────────
 
   /**
+   * Find the last "safe" break point — end of a complete sentence, paragraph,
+   * or code block — so we never stream a half-finished thought to mobile.
+   * Returns the index (exclusive) up to which the content is safe to send.
+   */
+  private findSafeBreak(text: string): number {
+    if (text.length === 0) return 0;
+
+    const lastFenceClose = text.lastIndexOf('\n```\n');
+    const lastDoubleLF = text.lastIndexOf('\n\n');
+    const lastSentenceEnd = Math.max(
+      text.lastIndexOf('. '),
+      text.lastIndexOf('.\n'),
+      text.lastIndexOf('!\n'),
+      text.lastIndexOf('?\n'),
+      text.lastIndexOf(':\n'),
+    );
+    const breakIdx = Math.max(lastDoubleLF, lastFenceClose, lastSentenceEnd);
+
+    if (breakIdx <= 0) return 0;
+
+    if (text[breakIdx] === '\n' && breakIdx + 1 < text.length && text[breakIdx + 1] === '\n') {
+      return breakIdx + 2;
+    }
+    if (text[breakIdx] === '\n') return breakIdx + 1;
+    return breakIdx + 2;
+  }
+
+  /**
    * RELAY CAPTURE — the proven, deterministic approach.
    * Augments the prompt with an instruction for Copilot to write its response
-   * to a relay file. FileSystemWatcher detects the write and streams to mobile.
-   * In hybrid mode, the interceptor session runs concurrently for URI logging.
+   * incrementally to a relay file. 5-second polling reads new content and
+   * streams only complete thoughts (sentences/paragraphs) to mobile.
    */
   private async runRelayCapture(
     prompt: string,
@@ -667,37 +775,31 @@ export class MobileCopilotServer {
     const RELAY_FILENAME = '.copilot-mobile-relay.md';
     const relayUri = vscode.Uri.joinPath(wsFolder.uri, RELAY_FILENAME);
     const DONE_MARKER = '<!-- MOBILE_DONE -->';
-    const TIMEOUT_MS = 180_000; // 3 min for agent work
-    const DEBOUNCE_MS = 4_000;  // 4s after last write = "done"
+    const TIMEOUT_MS = 180_000;
+    const POLL_INTERVAL_MS = 5_000;
+    const IDLE_TIMEOUT_MS = 15_000;
 
     // Delete relay file if it exists
     try {
       await vscode.workspace.fs.delete(relayUri);
     } catch { /* ignore if it doesn't exist */ }
 
-    // Build the augmented prompt — tells Copilot to write its response to the relay file
-    const augmentedPrompt =
-      prompt + '\n\n' +
-      '--- IMPORTANT INSTRUCTION ---\n' +
-      `After your response, also write your COMPLETE chat response (what you just said above) ` +
-      `as markdown into the workspace file \`${RELAY_FILENAME}\`. ` +
-      `This is to relay your answer to a mobile client that cannot see the chat panel. ` +
-      `End the file content with exactly this marker on its own line: ${DONE_MARKER}\n` +
-      'Copy your full response including explanations, code blocks, and formatting. ' +
-      'Do NOT skip this step.';
+    // The relay file instruction is handled by .github/copilot-instructions.md
+    // (injected as system context by VS Code). No prompt augmentation needed.
 
     // Watch for relay file changes and stream content to mobile
-    let lastContent = '';
     let sentLength = 0;
+    let lastContent = '';
     let hasReceivedContent = false;
 
     const relayPromise = new Promise<string>((resolve, reject) => {
-      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
       let resolved = false;
 
+      // ── Absolute timeout — safety net ──
       const timeoutTimer = setTimeout(() => {
         if (!resolved) {
           resolved = true;
+          clearInterval(pollTimer);
           watcher.dispose();
           if (lastContent.length > 0) {
             resolve(lastContent);
@@ -710,79 +812,106 @@ export class MobileCopilotServer {
         }
       }, TIMEOUT_MS);
 
-      const pattern = new vscode.RelativePattern(wsFolder, RELAY_FILENAME);
-      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+      // ── Idle timeout — finalize when no new content arrives ──
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      const resetIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (!hasReceivedContent) return;
+        idleTimer = setTimeout(async () => {
+          if (resolved) return;
+          try {
+            const finalBytes = await vscode.workspace.fs.readFile(relayUri);
+            const finalContent = Buffer.from(finalBytes).toString('utf8').trim();
+            if (finalContent.length > sentLength) {
+              const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
+              if (remaining.length > 0) send(remaining);
+              lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
+              sentLength = finalContent.length;
+            }
+          } catch { /* ignore */ }
+          resolved = true;
+          clearTimeout(timeoutTimer);
+          clearInterval(pollTimer);
+          watcher.dispose();
+          this.outputChannel.info('[Relay] Idle timeout — assuming done');
+          resolve(lastContent);
+        }, IDLE_TIMEOUT_MS);
+      };
 
+      // ── Core: read file, find safe break, stream only complete thoughts ──
       const checkFile = async () => {
         if (resolved) return;
         try {
           const bytes = await vscode.workspace.fs.readFile(relayUri);
           const content = Buffer.from(bytes).toString('utf8').trim();
 
-          if (content.length === 0) {
-            this.outputChannel.info('[Relay] File is empty, waiting for content...');
-            return;
-          }
+          if (content.length === 0) return;
+          this.outputChannel.info(`[Relay] Poll: file ${content.length} chars, sent ${sentLength}`);
 
-          if (content.length > sentLength) {
-            let newContent = content.substring(sentLength);
-            const cleanContent = newContent.replace(DONE_MARKER, '').trimEnd();
-            if (cleanContent.length > 0) {
-              hasReceivedContent = true;
-              send(cleanContent);
-              this.outputChannel.info(`[Relay] Sent ${cleanContent.length} chars to mobile`);
-            }
-            sentLength = content.length;
-            lastContent = content.replace(DONE_MARKER, '').trimEnd();
-          }
-
+          // Check for DONE marker → flush everything
           if (content.includes(DONE_MARKER)) {
+            const finalText = content.replace(DONE_MARKER, '').trimEnd();
+            if (finalText.length > sentLength) {
+              send(finalText.substring(sentLength));
+            }
+            lastContent = finalText;
             resolved = true;
             clearTimeout(timeoutTimer);
-            if (debounceTimer) clearTimeout(debounceTimer);
+            if (idleTimer) clearTimeout(idleTimer);
+            clearInterval(pollTimer);
             watcher.dispose();
             this.outputChannel.info('[Relay] DONE marker detected');
             resolve(lastContent);
             return;
           }
 
-          if (hasReceivedContent) {
-            if (debounceTimer) clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(async () => {
-              if (!resolved) {
-                try {
-                  const finalBytes = await vscode.workspace.fs.readFile(relayUri);
-                  const finalContent = Buffer.from(finalBytes).toString('utf8');
-                  if (finalContent.length > sentLength) {
-                    const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
-                    if (remaining.length > 0) send(remaining);
-                    lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
-                  }
-                } catch { /* ignore */ }
+          if (content.length <= sentLength) return;
 
-                resolved = true;
-                clearTimeout(timeoutTimer);
-                watcher.dispose();
-                this.outputChannel.info('[Relay] Debounce timeout — assuming done');
-                resolve(lastContent);
-              }
-            }, DEBOUNCE_MS);
+          hasReceivedContent = true;
+          resetIdleTimer();
+
+          // Only send up to the last safe break (complete sentence/paragraph)
+          const newContent = content.substring(sentLength);
+          const safeIdx = this.findSafeBreak(newContent);
+
+          if (safeIdx > 0) {
+            const safeChunk = newContent.substring(0, safeIdx);
+            send(safeChunk);
+            sentLength += safeIdx;
+            lastContent = content.substring(0, sentLength);
+            this.outputChannel.info(`[Relay] Streamed ${safeChunk.length} chars (safe break). Total sent: ${sentLength}`);
+          } else {
+            this.outputChannel.info(`[Relay] No safe break in ${newContent.length} new chars — holding`);
           }
         } catch (err: any) {
           this.outputChannel.warn(`[Relay] Error reading file: ${err.message}`);
         }
       };
 
-      watcher.onDidChange(checkFile);
-      watcher.onDidCreate(checkFile);
+      // ── File watcher — react to file changes but throttle ──
+      const pattern = new vscode.RelativePattern(wsFolder, RELAY_FILENAME);
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+
+      let lastWatcherCheck = 0;
+      const throttledCheck = () => {
+        const now = Date.now();
+        if (now - lastWatcherCheck < 2_000) return;
+        lastWatcherCheck = now;
+        checkFile();
+      };
+      watcher.onDidChange(throttledCheck);
+      watcher.onDidCreate(throttledCheck);
+
+      // ── Poll every 5 seconds as the primary streaming mechanism ──
+      const pollTimer = setInterval(checkFile, POLL_INTERVAL_MS);
     });
 
     // Inject prompt into native Copilot Chat panel
-    this.outputChannel.info('[Relay] Injecting augmented prompt into Copilot Chat...');
+    this.outputChannel.info('[Relay] Injecting prompt into Copilot Chat...');
     send('⏳ *Waiting for Copilot agent response on desktop...*\n\n');
 
     vscode.commands.executeCommand('workbench.action.chat.open', {
-      query: augmentedPrompt,
+      query: prompt,
       isPartialQuery: false,
     }).then(
       () => this.outputChannel.info('[Relay] Chat panel command executed'),
