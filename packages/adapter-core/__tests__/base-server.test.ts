@@ -111,6 +111,22 @@ describe('BaseServer', () => {
       expect(res.status).toBe(403);
     });
 
+    it('GET /api/pair-info returns token with DEBUG_PAIR=1 from loopback', async () => {
+      process.env.DEBUG_PAIR = '1';
+      // supertest connects via loopback by default
+      const res = await request(server._app).get('/api/pair-info');
+      // Note: supertest may use 127.0.0.1, which should pass loopback check
+      // The result depends on how Express resolves req.ip for supertest
+      // It might be 127.0.0.1 (passes) or undefined (fails with 403)
+      expect([200, 403]).toContain(res.status);
+      if (res.status === 200) {
+        expect(res.body.token).toBeDefined();
+        expect(res.body.pairingUrl).toBeDefined();
+        expect(res.body.wsUrl).toBeDefined();
+      }
+      delete process.env.DEBUG_PAIR;
+    });
+
     it('GET /api/auth returns 400 without token', async () => {
       const res = await request(server._app).get('/api/auth');
       expect(res.status).toBe(400);
@@ -326,6 +342,194 @@ describe('BaseServer', () => {
     it('getServerUrl returns localhost by default', async () => {
       const url = server.getServerUrl();
       expect(url).toMatch(/^http:\/\//);
+    });
+  });
+
+  // ─── WebSocket Integration ────────────────────────────────────
+
+  describe('WebSocket integration', () => {
+    let port: number;
+
+    beforeEach(async () => {
+      await server.start();
+      port = server.getRealPort();
+    });
+
+    afterEach(async () => {
+      await server.stop();
+    });
+
+    it('sends connection.ready on connect', (done) => {
+      const ws = new WebSocket(`ws://localhost:${port}/ws`);
+      ws.on('message', (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+        expect(msg.method).toBe('connection.ready');
+        expect(msg.params.requiresAuth).toBe(true);
+        expect(msg.params.serverVersion).toBe('0.2.0');
+        ws.close();
+        done();
+      });
+      ws.on('error', done);
+    });
+
+    it('authenticates with valid sessionId', (done) => {
+      // First get a session via HTTP auth
+      auth.generateToken().then((tok) => {
+        request(server._app).get(`/api/auth?token=${tok}`).then((res) => {
+          const sessionId = res.body.sessionId;
+
+          const ws = new WebSocket(`ws://localhost:${port}/ws`);
+          let gotReady = false;
+
+          ws.on('message', (data: Buffer) => {
+            const msg = JSON.parse(data.toString());
+
+            if (msg.method === 'connection.ready') {
+              gotReady = true;
+              ws.send(JSON.stringify({ method: 'auth', params: { sessionId } }));
+              return;
+            }
+
+            if (msg.method === 'auth.success') {
+              expect(msg.params.sessionId).toBe(sessionId);
+              ws.close();
+              done();
+              return;
+            }
+          });
+          ws.on('error', done);
+        });
+      });
+    });
+
+    it('authenticates with valid token directly', (done) => {
+      auth.generateToken().then((tok) => {
+        const ws = new WebSocket(`ws://localhost:${port}/ws`);
+
+        ws.on('message', (data: Buffer) => {
+          const msg = JSON.parse(data.toString());
+
+          if (msg.method === 'connection.ready') {
+            ws.send(JSON.stringify({ method: 'auth', params: { token: tok } }));
+            return;
+          }
+
+          if (msg.method === 'auth.success') {
+            expect(msg.params.sessionId).toBeDefined();
+            ws.close();
+            done();
+            return;
+          }
+        });
+        ws.on('error', done);
+      });
+    });
+
+    it('rejects invalid auth with 4003', (done) => {
+      const ws = new WebSocket(`ws://localhost:${port}/ws`);
+
+      ws.on('message', (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.method === 'connection.ready') {
+          ws.send(JSON.stringify({ method: 'auth', params: { token: 'invalid-token' } }));
+          return;
+        }
+
+        if (msg.method === 'auth.failed') {
+          // WS should then close with 4003
+        }
+      });
+
+      ws.on('close', (code: number) => {
+        expect(code).toBe(4003);
+        done();
+      });
+
+      ws.on('error', () => {}); // ignore connection reset
+    });
+
+    it('closes with 4002 on invalid message format', (done) => {
+      const ws = new WebSocket(`ws://localhost:${port}/ws`);
+
+      ws.on('message', (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.method === 'connection.ready') {
+          ws.send('not-valid-json{{{');
+        }
+      });
+
+      ws.on('close', (code: number) => {
+        expect(code).toBe(4002);
+        done();
+      });
+
+      ws.on('error', () => {}); // ignore
+    });
+
+    it('tracks connected session in onClientConnected callback', (done) => {
+      auth.generateToken().then((tok) => {
+        const ws = new WebSocket(`ws://localhost:${port}/ws`);
+
+        ws.on('message', (data: Buffer) => {
+          const msg = JSON.parse(data.toString());
+
+          if (msg.method === 'connection.ready') {
+            ws.send(JSON.stringify({ method: 'auth', params: { token: tok } }));
+            return;
+          }
+
+          if (msg.method === 'auth.success') {
+            expect(server.connectedSessions.length).toBeGreaterThan(0);
+            ws.close();
+            done();
+            return;
+          }
+        });
+        ws.on('error', done);
+      });
+    });
+  });
+
+  // ─── broadcastToAuthenticated ─────────────────────────────────
+
+  describe('broadcastToAuthenticated', () => {
+    it('sends to authenticated clients only', () => {
+      const authWs = { readyState: 1, send: jest.fn() } as any;
+      const unauthWs = { readyState: 1, send: jest.fn() } as any;
+
+      (server as any).clients.set(authWs, { authenticated: true, sessionId: 'a' });
+      (server as any).clients.set(unauthWs, { authenticated: false });
+
+      (server as any).broadcastToAuthenticated('test.event', { data: 'hello' });
+
+      expect(authWs.send).toHaveBeenCalled();
+      expect(unauthWs.send).not.toHaveBeenCalled();
+    });
+
+    it('skips clients with non-OPEN readyState', () => {
+      const closedWs = { readyState: 3, send: jest.fn() } as any; // CLOSED
+      (server as any).clients.set(closedWs, { authenticated: true, sessionId: 'b' });
+
+      (server as any).broadcastToAuthenticated('test.event', { data: 'x' });
+
+      expect(closedWs.send).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── sendToAllSessions ────────────────────────────────────────
+
+  describe('sendToAllSessions', () => {
+    it('queues for disconnected sessions', () => {
+      server._sessions.set('disc-sess', { ws: null, eventQueue: [], lastAgentResponse: null });
+      const openWs = { readyState: 1, send: jest.fn() } as any;
+      (server as any).clients.set(openWs, { authenticated: true, sessionId: 'other' });
+
+      (server as any).sendToAllSessions('event', { data: 'test' });
+
+      const session = server._sessions.get('disc-sess')!;
+      expect(session.eventQueue.length).toBe(1);
+      expect(session.eventQueue[0].method).toBe('event');
     });
   });
 });

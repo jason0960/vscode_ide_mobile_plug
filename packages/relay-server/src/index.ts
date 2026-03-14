@@ -5,7 +5,7 @@ import * as url from 'url';
 
 // ─── Types ──────────────────────────────────────────────────────
 
-interface Room {
+export interface Room {
   /** Short room code (6 chars, e.g. "A3F9K2") */
   code: string;
   /** Secret token only the host knows — prevents room hijacking */
@@ -29,19 +29,13 @@ const ROOM_TTL_MS = parseInt(process.env.ROOM_TTL_MS || String(4 * 60 * 60 * 100
 const MAX_ROOMS = parseInt(process.env.MAX_ROOMS || '1000', 10);
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const DEBUG_RELAY = process.env.DEBUG_RELAY === '1';
-const CODE_LENGTH = 6;
-
-// ─── State ──────────────────────────────────────────────────────
-
-const rooms = new Map<string, Room>();
-const wsToRoom = new Map<WebSocket, { roomCode: string; role: 'host' | 'client' }>();
-const alive = new Map<WebSocket, boolean>();
+export const CODE_LENGTH = 6;
 
 // ─── Room Code Generation ───────────────────────────────────────
 
-const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No 0/O/1/I ambiguity
+export const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No 0/O/1/I ambiguity
 
-function generateRoomCode(): string {
+export function generateRoomCode(existingRooms: Map<string, Room>): string {
   let code: string;
   let attempts = 0;
   do {
@@ -51,9 +45,15 @@ function generateRoomCode(): string {
       code += CODE_CHARS[bytes[i] % CODE_CHARS.length];
     }
     attempts++;
-  } while (rooms.has(code) && attempts < 100);
+  } while (existingRooms.has(code) && attempts < 100);
   return code;
 }
+
+// ─── State ──────────────────────────────────────────────────────
+
+const rooms = new Map<string, Room>();
+const wsToRoom = new Map<WebSocket, { roomCode: string; role: 'host' | 'client' }>();
+const alive = new Map<WebSocket, boolean>();
 
 // ─── HTTP Server ────────────────────────────────────────────────
 
@@ -136,7 +136,7 @@ function handleHostConnection(ws: WebSocket): void {
     return;
   }
 
-  const code = generateRoomCode();
+  const code = generateRoomCode(rooms);
   const hostSecret = crypto.randomBytes(16).toString('hex');
 
   const room: Room = {
@@ -365,57 +365,65 @@ function handleHostRejoin(ws: WebSocket, code: string, secret: string): void {
 
 // ─── Heartbeat ──────────────────────────────────────────────────
 
-const heartbeatInterval = setInterval(() => {
-  for (const [ws, isAlive] of alive) {
-    if (!isAlive) {
-      ws.terminate();
-      alive.delete(ws);
-      continue;
-    }
-    alive.set(ws, false);
-    ws.ping();
-  }
-}, HEARTBEAT_INTERVAL_MS);
+let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+let cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
-// ─── Room Cleanup ───────────────────────────────────────────────
-
-const cleanupInterval = setInterval(() => {
-  const now = Date.now();
-  for (const [code, room] of rooms) {
-    const lastActivity = new Date(room.lastActivity).getTime();
-    if (now - lastActivity > room.ttlMs) {
-      log(`[Room ${code}] Expired — cleaning up`);
-
-      // Close all connections
-      if (room.host && room.host.readyState === WebSocket.OPEN) {
-        room.host.close(4008, 'Room expired');
+if (require.main === module || process.env.RELAY_AUTOSTART === '1') {
+  heartbeatInterval = setInterval(() => {
+    for (const [ws, isAlive] of alive) {
+      if (!isAlive) {
+        ws.terminate();
+        alive.delete(ws);
+        continue;
       }
-      for (const client of room.clients) {
-        if (client.readyState === WebSocket.OPEN) {
-          client.close(4008, 'Room expired');
+      alive.set(ws, false);
+      ws.ping();
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  // ─── Room Cleanup ───────────────────────────────────────────────
+
+  cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [code, room] of rooms) {
+      const lastActivity = new Date(room.lastActivity).getTime();
+      if (now - lastActivity > room.ttlMs) {
+        log(`[Room ${code}] Expired — cleaning up`);
+
+        // Close all connections
+        if (room.host && room.host.readyState === WebSocket.OPEN) {
+          room.host.close(4008, 'Room expired');
         }
-      }
+        for (const client of room.clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.close(4008, 'Room expired');
+          }
+        }
 
-      rooms.delete(code);
+        rooms.delete(code);
+      }
     }
-  }
-}, 60_000); // Check every minute
+  }, 60_000); // Check every minute
+}
 
 // ─── Startup ────────────────────────────────────────────────────
 
-httpServer.listen(PORT, () => {
-  log(`Mobile Copilot Relay Server listening on port ${PORT}`);
-  log(`  Health check: http://localhost:${PORT}/health`);
-  log(`  Room TTL: ${ROOM_TTL_MS / 1000 / 60} minutes`);
-  log(`  Max rooms: ${MAX_ROOMS}`);
-});
+// Only start the server when run directly (not when imported by tests)
+if (require.main === module || process.env.RELAY_AUTOSTART === '1') {
+  httpServer.listen(PORT, () => {
+    log(`Mobile Copilot Relay Server listening on port ${PORT}`);
+    log(`  Health check: http://localhost:${PORT}/health`);
+    log(`  Room TTL: ${ROOM_TTL_MS / 1000 / 60} minutes`);
+    log(`  Max rooms: ${MAX_ROOMS}`);
+  });
+}
 
 // ─── Graceful Shutdown ──────────────────────────────────────────
 
 function shutdown() {
   log('Shutting down...');
-  clearInterval(heartbeatInterval);
-  clearInterval(cleanupInterval);
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  if (cleanupInterval) clearInterval(cleanupInterval);
 
   for (const [code, room] of rooms) {
     if (room.host && room.host.readyState === WebSocket.OPEN) {

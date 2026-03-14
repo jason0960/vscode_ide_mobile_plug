@@ -18,6 +18,7 @@ import {
   setMobileCallbacks,
   setCurrentMobileRequestId,
 } from './participant';
+import { findSafeBreak } from './stream-utils';
 
 /**
  * VS Code implementation of the Mobile Copilot server.
@@ -72,7 +73,7 @@ export class VsCodeServer extends BaseServer {
   // ─── BaseServer hooks ───────────────────────────────────────────
 
   protected getPort(): number {
-    return this.config.get<number>('port', 3847);
+    return this.config.get<number>('port', 3847) ?? 3847;
   }
 
   protected getStaticFilesPath(): string {
@@ -111,7 +112,7 @@ export class VsCodeServer extends BaseServer {
     const provider = this.config.get<string>('tunnelProvider', 'none');
     if (provider !== 'none') {
       try {
-        const tunnelUrl = await this.tunnel.startTunnel(this.port);
+        const tunnelUrl = await (this.tunnel as any).startTunnel(this.port);
         this.logger.info(`Tunnel active: ${tunnelUrl}`);
         this.updateStatusBar('tunnel');
       } catch (err: any) {
@@ -684,35 +685,10 @@ export class VsCodeServer extends BaseServer {
   // ─── Capture Strategies ─────────────────────────────────────────
 
   /**
-   * Find the last "safe" break point — end of a complete sentence, paragraph,
-   * or code block — so we never stream a half-finished thought to mobile.
-   * Returns the index (exclusive) up to which the content is safe to send.
+   * Find the last "safe" break point — delegates to the exported `findSafeBreak`.
    */
   private findSafeBreak(text: string): number {
-    if (text.length === 0) return 0;
-
-    // If the text ends with a code fence close, it's a complete block
-    const lastFenceClose = text.lastIndexOf('\n```\n');
-    const lastDoubleLF = text.lastIndexOf('\n\n');
-    const lastSentenceEnd = Math.max(
-      text.lastIndexOf('. '),
-      text.lastIndexOf('.\n'),
-      text.lastIndexOf('!\n'),
-      text.lastIndexOf('?\n'),
-      text.lastIndexOf(':\n'),
-    );
-    // Prefer paragraph breaks > code fence close > sentence-ending punctuation
-    const breakIdx = Math.max(lastDoubleLF, lastFenceClose, lastSentenceEnd);
-
-    if (breakIdx <= 0) return 0; // no safe break found — hold everything
-
-    // Include the break character(s) themselves
-    if (text[breakIdx] === '\n' && breakIdx + 1 < text.length && text[breakIdx + 1] === '\n') {
-      return breakIdx + 2;
-    }
-    if (text[breakIdx] === '\n') return breakIdx + 1;
-    // For ". " or ".\n" etc, include the punctuation + whitespace
-    return breakIdx + 2;
+    return findSafeBreak(text);
   }
 
   private async runRelayCapture(

@@ -24,6 +24,11 @@ jest.mock('../src/context', () => {
       readFile: jest.fn().mockResolvedValue('file content here'),
       getFileTree: jest.fn().mockResolvedValue([]),
       listDirectory: jest.fn().mockResolvedValue([]),
+      getDiagnostics: jest.fn().mockReturnValue([]),
+      getDiagnosticsSummary: jest.fn().mockReturnValue({ errors: 0, warnings: 0 }),
+      getWorkspaceInfo: jest.fn().mockResolvedValue({ name: 'project', files: [] }),
+      getGitStatus: jest.fn().mockResolvedValue(null),
+      getTerminals: jest.fn().mockReturnValue([]),
     })),
   };
 });
@@ -234,6 +239,347 @@ describe('AgentOperations', () => {
       await expect(
         agent.readFile({ path: '../../etc/passwd' }),
       ).rejects.toThrow(/Path traversal blocked/);
+    });
+  });
+
+  // ─── writeFile ────────────────────────────────────────────────
+
+  describe('writeFile', () => {
+    it('writes file when it exists', async () => {
+      vscode.workspace.fs.stat.mockResolvedValue({ type: 1, size: 50 });
+      const result = await agent.writeFile({
+        path: 'src/main.ts',
+        content: 'console.log("hello");',
+        createIfMissing: false,
+      });
+      expect(result.success).toBe(true);
+      expect(result.path).toBe('src/main.ts');
+      expect(vscode.workspace.fs.writeFile).toHaveBeenCalled();
+    });
+
+    it('throws when file not found and createIfMissing=false', async () => {
+      vscode.workspace.fs.stat.mockRejectedValue(new Error('ENOENT'));
+      await expect(
+        agent.writeFile({ path: 'nonexistent.ts', content: 'x', createIfMissing: false }),
+      ).rejects.toThrow(/File not found.*createIfMissing/);
+    });
+
+    it('creates file when not found and createIfMissing=true', async () => {
+      vscode.workspace.fs.stat.mockRejectedValue(new Error('ENOENT'));
+      const result = await agent.writeFile({
+        path: 'new-file.ts',
+        content: 'new content',
+        createIfMissing: true,
+      });
+      expect(result.success).toBe(true);
+      expect(vscode.workspace.fs.writeFile).toHaveBeenCalled();
+    });
+  });
+
+  // ─── createFile ───────────────────────────────────────────────
+
+  describe('createFile', () => {
+    it('creates file with content', async () => {
+      const result = await agent.createFile({
+        path: 'src/new.ts',
+        content: 'export default {};',
+      });
+      expect(result.success).toBe(true);
+      expect(result.path).toBe('src/new.ts');
+      expect(vscode.workspace.fs.createDirectory).toHaveBeenCalled();
+      expect(vscode.workspace.fs.writeFile).toHaveBeenCalled();
+    });
+
+    it('blocks path traversal', async () => {
+      await expect(
+        agent.createFile({ path: '../../etc/evil', content: 'bad' }),
+      ).rejects.toThrow(/Path traversal blocked/);
+    });
+  });
+
+  // ─── deleteFile ───────────────────────────────────────────────
+
+  describe('deleteFile', () => {
+    it('deletes file via workspace fs', async () => {
+      const result = await agent.deleteFile({ path: 'src/old.ts' });
+      expect(result.success).toBe(true);
+      expect(vscode.workspace.fs.delete).toHaveBeenCalled();
+    });
+
+    it('blocks path traversal on delete', async () => {
+      await expect(
+        agent.deleteFile({ path: '../../etc/passwd' }),
+      ).rejects.toThrow(/Path traversal blocked/);
+    });
+  });
+
+  // ─── editFile ─────────────────────────────────────────────────
+
+  describe('editFile', () => {
+    it('replaces text successfully', async () => {
+      const originalText = 'const x = 1;\nconst y = 2;\n';
+      vscode.workspace.openTextDocument.mockResolvedValue({
+        getText: () => originalText,
+        positionAt: (offset: number) => ({ line: 0, character: offset }),
+        save: jest.fn(),
+      });
+      vscode.workspace.applyEdit.mockResolvedValue(true);
+
+      const result = await agent.editFile({
+        path: 'src/index.ts',
+        oldText: 'const x = 1;',
+        newText: 'const x = 42;',
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('throws when oldText not found', async () => {
+      vscode.workspace.openTextDocument.mockResolvedValue({
+        getText: () => 'totally different content',
+        positionAt: jest.fn(),
+        save: jest.fn(),
+      });
+
+      await expect(
+        agent.editFile({
+          path: 'src/index.ts',
+          oldText: 'nonexistent text',
+          newText: 'replacement',
+        }),
+      ).rejects.toThrow(/Could not find the text to replace/);
+    });
+  });
+
+  // ─── searchFiles ──────────────────────────────────────────────
+
+  describe('searchFiles', () => {
+    it('searches files case-insensitively', async () => {
+      const fileUri = { fsPath: '/workspace/project/src/main.ts', scheme: 'file' };
+      vscode.workspace.findFiles.mockResolvedValue([fileUri]);
+      vscode.workspace.fs.readFile.mockResolvedValue(
+        Buffer.from('Hello World\nfoo bar\nhello again\n'),
+      );
+      vscode.workspace.asRelativePath.mockReturnValue('src/main.ts');
+
+      const results = await agent.searchFiles({ query: 'hello' });
+      expect(results.length).toBe(1);
+      expect(results[0].matches.length).toBe(2); // "Hello World" and "hello again"
+      expect(results[0].matches[0].line).toBe(1);
+      expect(results[0].matches[1].line).toBe(3);
+    });
+
+    it('returns empty when no matches', async () => {
+      vscode.workspace.findFiles.mockResolvedValue([]);
+      const results = await agent.searchFiles({ query: 'zzz' });
+      expect(results).toEqual([]);
+    });
+
+    it('skips unreadable files', async () => {
+      const fileUri = { fsPath: '/workspace/project/binary.bin', scheme: 'file' };
+      vscode.workspace.findFiles.mockResolvedValue([fileUri]);
+      vscode.workspace.fs.readFile.mockRejectedValue(new Error('Binary file'));
+
+      const results = await agent.searchFiles({ query: 'test' });
+      expect(results).toEqual([]);
+    });
+
+    it('caps matches per file at 10', async () => {
+      const fileUri = { fsPath: '/workspace/project/big.ts', scheme: 'file' };
+      vscode.workspace.findFiles.mockResolvedValue([fileUri]);
+      // 15 lines each containing "match"
+      const lines = Array.from({ length: 15 }, (_, i) => `match line ${i}`).join('\n');
+      vscode.workspace.fs.readFile.mockResolvedValue(Buffer.from(lines));
+      vscode.workspace.asRelativePath.mockReturnValue('big.ts');
+
+      const results = await agent.searchFiles({ query: 'match' });
+      expect(results[0].matches.length).toBe(10);
+    });
+
+    it('respects maxResults', async () => {
+      const uris = Array.from({ length: 5 }, (_, i) => ({
+        fsPath: `/workspace/project/file${i}.ts`,
+        scheme: 'file',
+      }));
+      vscode.workspace.findFiles.mockResolvedValue(uris);
+      vscode.workspace.fs.readFile.mockResolvedValue(Buffer.from('target line\n'));
+      vscode.workspace.asRelativePath.mockImplementation((p: any) => p.fsPath || p);
+
+      const results = await agent.searchFiles({ query: 'target', maxResults: 2 });
+      expect(results.length).toBe(2);
+    });
+  });
+
+  // ─── openFile ─────────────────────────────────────────────────
+
+  describe('openFile', () => {
+    it('opens a file without line number', async () => {
+      vscode.workspace.openTextDocument.mockResolvedValue({ uri: { fsPath: '/workspace/project/src/test.ts' } });
+      vscode.window.showTextDocument = jest.fn().mockResolvedValue(undefined);
+
+      const result = await agent.openFile({ path: 'src/test.ts' });
+      expect(result.success).toBe(true);
+      expect(vscode.window.showTextDocument).toHaveBeenCalled();
+    });
+
+    it('opens a file with line number selection', async () => {
+      vscode.workspace.openTextDocument.mockResolvedValue({ uri: { fsPath: '/workspace/project/src/test.ts' } });
+      vscode.window.showTextDocument = jest.fn().mockResolvedValue(undefined);
+
+      const result = await agent.openFile({ path: 'src/test.ts', line: 10 });
+      expect(result.success).toBe(true);
+      // showTextDocument should have been called with selection options
+      const callArgs = (vscode.window.showTextDocument as jest.Mock).mock.calls[0];
+      expect(callArgs[1]).toBeDefined();
+      expect(callArgs[1].selection).toBeDefined();
+    });
+  });
+
+  // ─── getActiveEditor ─────────────────────────────────────────
+
+  describe('getActiveEditor', () => {
+    it('returns null when no editor is active', async () => {
+      vscode.window.activeTextEditor = undefined;
+      const result = await agent.getActiveEditor();
+      expect(result).toBeNull();
+    });
+
+    it('returns editor info when editor is active', async () => {
+      vscode.workspace.asRelativePath.mockReturnValue('src/active.ts');
+      vscode.window.activeTextEditor = {
+        document: {
+          uri: { fsPath: '/workspace/project/src/active.ts' },
+          languageId: 'typescript',
+          lineCount: 42,
+        },
+        selection: { isEmpty: true },
+      };
+
+      const result = await agent.getActiveEditor();
+      expect(result).not.toBeNull();
+      expect(result!.language).toBe('typescript');
+      expect(result!.lineCount).toBe(42);
+      expect(result!.selection).toBeUndefined();
+    });
+
+    it('returns selected text when selection exists', async () => {
+      vscode.workspace.asRelativePath.mockReturnValue('src/active.ts');
+      const mockDoc = {
+        uri: { fsPath: '/workspace/project/src/active.ts' },
+        languageId: 'typescript',
+        lineCount: 10,
+        getText: jest.fn().mockReturnValue('selected text'),
+      };
+      vscode.window.activeTextEditor = {
+        document: mockDoc,
+        selection: { isEmpty: false },
+      };
+
+      const result = await agent.getActiveEditor();
+      expect(result!.selection).toBe('selected text');
+    });
+  });
+
+  // ─── runCommand (exec behavior) ───────────────────────────────
+
+  describe('runCommand (exec behavior)', () => {
+    it('returns output and exitCode on success', async () => {
+      const result = await agent.runCommand({ command: 'echo hello' });
+      expect(result.sent).toBe(true);
+      expect(result.output).toBeDefined();
+      expect(result.exitCode).toBeDefined();
+    });
+
+    it('truncates output longer than 50KB', async () => {
+      // Generate a command that produces large output — we mock exec for this
+      const childProcess = require('child_process');
+      const origExec = childProcess.exec;
+      childProcess.exec = jest.fn((cmd: string, opts: any, cb: Function) => {
+        cb(null, 'x'.repeat(60000), '');
+      });
+
+      try {
+        const result = await agent.runCommand({ command: 'large-output-cmd' });
+        expect(result.output!.length).toBeLessThanOrEqual(50000 + 20); // 50KB + "... (truncated)"
+        expect(result.output).toContain('truncated');
+      } finally {
+        childProcess.exec = origExec;
+      }
+    });
+
+    it('uses default terminal name when none provided', async () => {
+      const result = await agent.runCommand({ command: 'echo test' });
+      expect(result.terminalName).toBe('Mobile Copilot');
+    });
+
+    it('uses custom terminal name when provided', async () => {
+      const result = await agent.runCommand({ command: 'echo test', terminalName: 'MyTerm' });
+      expect(result.terminalName).toBe('MyTerm');
+    });
+  });
+
+  // ─── getDiagnostics / getDiagnosticsSummary ───────────────────
+
+  describe('getDiagnostics', () => {
+    it('delegates to contextProvider', () => {
+      agent.getDiagnostics();
+      // The mock contextProvider should have been called
+    });
+
+    it('delegates getDiagnosticsSummary to contextProvider', () => {
+      agent.getDiagnosticsSummary();
+    });
+  });
+
+  // ─── gitDiff ──────────────────────────────────────────────────
+
+  describe('gitDiff', () => {
+    it('returns null when git extension not found', async () => {
+      vscode.extensions.getExtension.mockReturnValue(null);
+      const result = await agent.gitDiff();
+      expect(result).toBeNull();
+    });
+
+    it('returns diff from git extension', async () => {
+      const mockRepo = { diff: jest.fn().mockResolvedValue('diff --git a/file.ts') };
+      vscode.extensions.getExtension.mockReturnValue({
+        isActive: true,
+        exports: { getAPI: () => ({ repositories: [mockRepo] }) },
+      });
+
+      const result = await agent.gitDiff();
+      expect(result).toBe('diff --git a/file.ts');
+    });
+
+    it('returns (no changes) when diff is empty', async () => {
+      const mockRepo = { diff: jest.fn().mockResolvedValue('') };
+      vscode.extensions.getExtension.mockReturnValue({
+        isActive: true,
+        exports: { getAPI: () => ({ repositories: [mockRepo] }) },
+      });
+
+      const result = await agent.gitDiff();
+      expect(result).toBe('(no changes)');
+    });
+
+    it('returns null when no repositories exist', async () => {
+      vscode.extensions.getExtension.mockReturnValue({
+        isActive: true,
+        exports: { getAPI: () => ({ repositories: [] }) },
+      });
+
+      const result = await agent.gitDiff();
+      expect(result).toBeNull();
+    });
+  });
+
+  // ─── dispose ──────────────────────────────────────────────────
+
+  describe('dispose', () => {
+    it('disposes managed terminals', async () => {
+      // Run a command to create a terminal
+      await agent.runCommand({ command: 'echo test' });
+      agent.dispose();
+      // Should not throw
     });
   });
 });

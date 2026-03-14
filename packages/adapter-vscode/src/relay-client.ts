@@ -48,7 +48,7 @@ export class RelayClient {
       return this.roomCode;
     }
 
-    const relayUrl = this.config.get<string>('relayUrl', '').replace(/\/$/, '');
+    const relayUrl = (this.config.get<string>('relayUrl', '') ?? '').replace(/\/$/, '');
     if (!relayUrl) {
       throw new Error(
         'No relay URL configured. Set mobileCopilot.relayUrl in settings ' +
@@ -202,7 +202,7 @@ export class RelayClient {
     this.reconnectTimer = setTimeout(async () => {
       if (this.disposed) return;
 
-      const relayUrl = this.config.get<string>('relayUrl', '').replace(/\/$/, '');
+      const relayUrl = (this.config.get<string>('relayUrl', '') ?? '').replace(/\/$/, '');
       if (!relayUrl || !this.roomCode || !this.hostSecret) {
         this.reconnecting = false;
         return;
