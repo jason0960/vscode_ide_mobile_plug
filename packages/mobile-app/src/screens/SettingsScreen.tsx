@@ -2,16 +2,18 @@
  * Settings Screen — connection info, theme, model, disconnect.
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   ScrollView,
   StyleSheet,
   Switch,
   Alert,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useAppStore } from '../store/AppStore';
 import { Colors, Spacing, FontSize, BorderRadius, ThemeMode } from '../theme';
 
@@ -24,6 +26,7 @@ export default function SettingsScreen() {
     sessionId,
     relayUrl,
     relayCode,
+    relayServerUrl,
     theme,
     selectedModel,
     chatMode,
@@ -31,11 +34,14 @@ export default function SettingsScreen() {
     setTheme,
     setSelectedModel,
     setChatMode,
+    setRelayServerUrl,
     disconnect,
   } = useAppStore();
 
   const colors = Colors[theme];
   const isAuthenticated = connectionStatus === 'authenticated';
+  const [editingRelayUrl, setEditingRelayUrl] = useState(false);
+  const [relayUrlDraft, setRelayUrlDraft] = useState(relayServerUrl);
 
   const handleDisconnect = () => {
     Alert.alert('Disconnect', 'Are you sure you want to disconnect?', [
@@ -48,14 +54,23 @@ export default function SettingsScreen() {
     <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>{title}</Text>
   );
 
-  const Row = ({ label, value, onPress }: { label: string; value?: string; onPress?: () => void }) => (
+  const Row = ({ label, value, valueIcon, valueIconColor, onPress }: {
+    label: string;
+    value?: string;
+    valueIcon?: keyof typeof Ionicons.glyphMap;
+    valueIconColor?: string;
+    onPress?: () => void;
+  }) => (
     <TouchableOpacity
       style={[styles.row, { borderBottomColor: colors.border }]}
       onPress={onPress}
       disabled={!onPress}
     >
       <Text style={[styles.rowLabel, { color: colors.text }]}>{label}</Text>
-      {value && <Text style={[styles.rowValue, { color: colors.textSecondary }]}>{value}</Text>}
+      <View style={styles.rowValueRow}>
+        {valueIcon && <Ionicons name={valueIcon} size={14} color={valueIconColor || colors.textSecondary} />}
+        {value && <Text style={[styles.rowValue, { color: colors.textSecondary }]}>{value}</Text>}
+      </View>
     </TouchableOpacity>
   );
 
@@ -64,16 +79,80 @@ export default function SettingsScreen() {
       {/* Connection */}
       <SectionHeader title="CONNECTION" />
       <View style={[styles.section, { backgroundColor: colors.surface }]}>
-        <Row label="Status" value={
-          connectionStatus === 'authenticated' ? '🟢 Connected'
-          : connectionStatus === 'connecting' || connectionStatus === 'connected' ? '🟡 Connecting'
-          : '🔴 Disconnected'
-        } />
-        <Row label="Mode" value={connection.currentConfig?.mode === 'relay' ? '🌐 Relay' : '📡 Direct'} />
+        <Row
+          label="Status"
+          value={
+            connectionStatus === 'authenticated' ? 'Connected'
+            : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'Connecting'
+            : 'Disconnected'
+          }
+          valueIcon={
+            connectionStatus === 'authenticated' ? 'ellipse'
+            : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'ellipse'
+            : 'ellipse'
+          }
+          valueIconColor={
+            connectionStatus === 'authenticated' ? colors.online
+            : connectionStatus === 'connecting' || connectionStatus === 'connected' ? colors.connecting
+            : colors.offline
+          }
+        />
+        <Row
+          label="Mode"
+          value={connection.currentConfig?.mode === 'relay' ? 'Relay' : 'Direct'}
+          valueIcon={connection.currentConfig?.mode === 'relay' ? 'globe-outline' : 'radio-outline'}
+        />
         {workspace && <Row label="Workspace" value={workspace.name} />}
         {workspace?.gitBranch && <Row label="Branch" value={workspace.gitBranch} />}
         {relayCode && <Row label="Room Code" value={relayCode} />}
         {relayUrl && <Row label="Relay URL" value={relayUrl} />}
+      </View>
+
+      {/* Relay Server */}
+      <SectionHeader title="RELAY SERVER" />
+      <View style={[styles.section, { backgroundColor: colors.surface }]}>
+        {editingRelayUrl ? (
+          <View style={[styles.row, { borderBottomColor: colors.border, flexDirection: 'column', alignItems: 'stretch' }]}>
+            <TextInput
+              style={[styles.relayInput, { backgroundColor: colors.background, color: colors.text, borderColor: colors.border }]}
+              value={relayUrlDraft}
+              onChangeText={setRelayUrlDraft}
+              placeholder="ws://... or wss://..."
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              autoFocus
+            />
+            <View style={styles.relayBtnRow}>
+              <TouchableOpacity
+                style={[styles.relayBtn, { backgroundColor: colors.primary }]}
+                onPress={() => {
+                  setRelayServerUrl(relayUrlDraft.trim());
+                  setEditingRelayUrl(false);
+                }}
+              >
+                <Text style={styles.relayBtnText}>Save</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.relayBtn, { backgroundColor: colors.border }]}
+                onPress={() => {
+                  setRelayUrlDraft(relayServerUrl);
+                  setEditingRelayUrl(false);
+                }}
+              >
+                <Text style={[styles.relayBtnText, { color: colors.text }]}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : (
+          <Row label="Server URL" value={relayServerUrl} onPress={() => setEditingRelayUrl(true)} />
+        )}
+        <View style={[styles.row, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.hintText, { color: colors.textMuted }]}>
+            The WebSocket URL of your relay server. All room codes resolve against this server.
+          </Text>
+        </View>
       </View>
 
       {/* Appearance */}
@@ -186,6 +265,7 @@ const styles = StyleSheet.create({
   },
   rowLabel: { fontSize: FontSize.md },
   rowValue: { fontSize: FontSize.sm, maxWidth: '60%', textAlign: 'right' },
+  rowValueRow: { flexDirection: 'row', alignItems: 'center', gap: 6, maxWidth: '60%' },
   modeToggle: {
     flexDirection: 'row',
     borderRadius: BorderRadius.md,
@@ -217,6 +297,28 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   modelText: { fontSize: FontSize.sm },
+  relayInput: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    padding: Spacing.md,
+    fontSize: FontSize.sm,
+    marginBottom: Spacing.sm,
+  },
+  relayBtnRow: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    marginBottom: Spacing.xs,
+  },
+  relayBtn: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    borderRadius: BorderRadius.md,
+  },
+  relayBtnText: { color: '#fff', fontSize: FontSize.sm, fontWeight: '600' },
+  hintText: {
+    fontSize: FontSize.xs,
+    lineHeight: 18,
+  },
   version: {
     fontSize: FontSize.xs,
     textAlign: 'center',

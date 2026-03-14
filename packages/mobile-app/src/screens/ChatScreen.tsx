@@ -15,6 +15,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import Markdown from 'react-native-markdown-display';
+import { Ionicons } from '@expo/vector-icons';
 import { useAppStore, ChatMessage } from '../store/AppStore';
 import { Colors, Spacing, FontSize, BorderRadius, ThemeColors } from '../theme';
 
@@ -237,7 +238,7 @@ export default function ChatScreen() {
       {/* Messages */}
       {data.length === 0 ? (
         <View style={styles.welcome}>
-          <Text style={[styles.welcomeEmoji]}>👋</Text>
+          <Ionicons name="code-slash-outline" size={48} color={colors.textMuted} />
           <Text style={[styles.welcomeTitle, { color: colors.text }]}>
             {chatMode === 'agent' ? 'Ask Copilot Agent' : 'Quick Chat'}
           </Text>
@@ -249,10 +250,10 @@ export default function ChatScreen() {
 
           <View style={styles.quickActions}>
             {[
-              { emoji: '📁', text: 'Explore workspace', prompt: 'What files are in this workspace?' },
-              { emoji: '🔍', text: 'Check diagnostics', prompt: 'Are there any errors or warnings in the code?' },
-              { emoji: '📋', text: 'Project overview', prompt: 'Summarize the current project and its structure' },
-              { emoji: '🔀', text: 'Git status', prompt: "What's the git status?" },
+              { icon: 'folder-open-outline' as const, text: 'Explore workspace', prompt: 'What files are in this workspace?' },
+              { icon: 'bug-outline' as const, text: 'Check diagnostics', prompt: 'Are there any errors or warnings in the code?' },
+              { icon: 'document-text-outline' as const, text: 'Project overview', prompt: 'Summarize the current project and its structure' },
+              { icon: 'git-branch-outline' as const, text: 'Git status', prompt: "What's the git status?" },
             ].map((action) => (
               <TouchableOpacity
                 key={action.prompt}
@@ -264,7 +265,7 @@ export default function ChatScreen() {
                 }}
                 disabled={!isAuthenticated}
               >
-                <Text style={styles.quickActionEmoji}>{action.emoji}</Text>
+                <Ionicons name={action.icon} size={16} color={colors.primaryLight} />
                 <Text style={[styles.quickActionText, { color: colors.text }]}>{action.text}</Text>
               </TouchableOpacity>
             ))}
@@ -308,7 +309,7 @@ export default function ChatScreen() {
           onPress={handleSend}
           disabled={!canSend}
         >
-          <Text style={styles.sendBtnText}>↑</Text>
+          <Ionicons name="arrow-up" size={20} color="#fff" />
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
@@ -360,9 +361,8 @@ const styles = StyleSheet.create({
   dot2: { opacity: 0.6 },
   dot3: { opacity: 0.8 },
   welcome: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: Spacing.xl },
-  welcomeEmoji: { fontSize: 48, marginBottom: Spacing.md },
-  welcomeTitle: { fontSize: FontSize.xl, fontWeight: '700', marginBottom: Spacing.sm },
-  welcomeDesc: { fontSize: FontSize.md, textAlign: 'center', lineHeight: 22 },
+  welcomeTitle: { fontSize: FontSize.xl, fontWeight: '700', marginTop: Spacing.lg, marginBottom: Spacing.sm },
+  welcomeDesc: { fontSize: FontSize.md, textAlign: 'center', lineHeight: 24 },
   quickActions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -378,7 +378,6 @@ const styles = StyleSheet.create({
     borderRadius: BorderRadius.full,
     gap: Spacing.xs,
   },
-  quickActionEmoji: { fontSize: 16 },
   quickActionText: { fontSize: FontSize.sm },
   agentBanner: {
     flexDirection: 'row',
@@ -406,11 +405,10 @@ const styles = StyleSheet.create({
     minHeight: 40,
   },
   sendBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sendBtnText: { color: '#fff', fontSize: 20, fontWeight: '700' },
 });

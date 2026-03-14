@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { useAppStore } from '../store/AppStore';
 import { Colors, Spacing, FontSize, BorderRadius } from '../theme';
 
@@ -28,18 +29,17 @@ export default function ConnectScreen() {
   const {
     connectionStatus,
     connectionError,
-    relayUrl: savedRelayUrl,
     theme,
     connectDirect,
-    connectRelay,
+    connectRelayWithCode,
+    disconnect,
   } = useAppStore();
 
   const colors = Colors[theme];
 
-  const [mode, setMode] = useState<ConnectMode>('scan');
+  const [mode, setMode] = useState<ConnectMode>('relay');
   const [directUrl, setDirectUrl] = useState('');
   const [token, setToken] = useState('');
-  const [relayUrl, setRelayUrl] = useState(savedRelayUrl || '');
   const [roomCode, setRoomCode] = useState('');
   const [scanned, setScanned] = useState(false);
 
@@ -87,8 +87,7 @@ export default function ConnectScreen() {
 
   const handleRelayConnect = () => {
     if (!roomCode.trim() || roomCode.trim().length < 4) return;
-    if (!relayUrl.trim()) return;
-    connectRelay(relayUrl.trim(), roomCode.trim().toUpperCase());
+    connectRelayWithCode(roomCode.trim().toUpperCase());
   };
 
   const handleDirectConnect = () => {
@@ -118,15 +117,26 @@ export default function ConnectScreen() {
 
       {/* Mode Tabs */}
       <View style={[styles.tabBar, { backgroundColor: colors.surface }]}>
-        {(['scan', 'relay', 'direct'] as const).map((m) => (
+        {([
+          { key: 'scan' as const, icon: 'scan-outline' as const, label: 'Scan' },
+          { key: 'relay' as const, icon: 'globe-outline' as const, label: 'Relay' },
+          { key: 'direct' as const, icon: 'radio-outline' as const, label: 'Direct' },
+        ]).map((m) => (
           <TouchableOpacity
-            key={m}
-            style={[styles.tab, mode === m && { backgroundColor: colors.primary }]}
-            onPress={() => { setMode(m); setScanned(false); }}
+            key={m.key}
+            style={[styles.tab, mode === m.key && { backgroundColor: colors.primary }]}
+            onPress={() => { setMode(m.key); setScanned(false); }}
           >
-            <Text style={[styles.tabText, { color: mode === m ? '#fff' : colors.textSecondary }]}>
-              {m === 'scan' ? '📷 Scan' : m === 'relay' ? '🌐 Relay' : '📡 Direct'}
-            </Text>
+            <View style={styles.tabContent}>
+              <Ionicons
+                name={m.icon}
+                size={16}
+                color={mode === m.key ? '#fff' : colors.textSecondary}
+              />
+              <Text style={[styles.tabText, { color: mode === m.key ? '#fff' : colors.textSecondary }]}>
+                {m.label}
+              </Text>
+            </View>
           </TouchableOpacity>
         ))}
       </View>
@@ -162,6 +172,14 @@ export default function ConnectScreen() {
                       ? 'Processing...'
                       : 'Point at the QR code in VS Code'}
                 </Text>
+                {isConnecting && (
+                  <TouchableOpacity
+                    style={[styles.rescanBtn, { backgroundColor: colors.error || '#e74c3c' }]}
+                    onPress={disconnect}
+                  >
+                    <Text style={styles.rescanBtnText}>Cancel</Text>
+                  </TouchableOpacity>
+                )}
                 {scanned && !isConnecting && (
                   <TouchableOpacity
                     style={[styles.rescanBtn, { backgroundColor: colors.primary }]}
@@ -173,7 +191,7 @@ export default function ConnectScreen() {
               </View>
             ) : (
               <View style={styles.permissionBox}>
-                <Text style={styles.permIcon}>📷</Text>
+                <Ionicons name="camera-outline" size={48} color={colors.textSecondary} />
                 <Text style={[styles.permTitle, { color: colors.text }]}>Camera Access Needed</Text>
                 <Text style={[styles.permDesc, { color: colors.textSecondary }]}>
                   Camera is used to scan the QR code shown in VS Code for quick pairing.
@@ -198,9 +216,9 @@ export default function ConnectScreen() {
         {mode === 'relay' && (
           <ScrollView contentContainerStyle={styles.formScroll} keyboardShouldPersistTaps="handled">
             <View style={[styles.card, { backgroundColor: colors.surface }]}>
-              <Text style={[styles.cardTitle, { color: colors.text }]}>Cloud Relay</Text>
+              <Text style={[styles.cardTitle, { color: colors.text }]}>Enter Room Code</Text>
               <Text style={[styles.cardDesc, { color: colors.textSecondary }]}>
-                Enter the room code shown in VS Code after running "Connect Relay"
+                In VS Code run "Mobile Copilot: Connect Cloud Relay" — then type the 6-character code below
               </Text>
 
               <TextInput
@@ -209,7 +227,7 @@ export default function ConnectScreen() {
                   color: colors.text,
                   borderColor: colors.border,
                 }]}
-                placeholder="ROOM CODE"
+                placeholder="ABC123"
                 placeholderTextColor={colors.textMuted}
                 value={roomCode}
                 onChangeText={(t) => setRoomCode(t.toUpperCase())}
@@ -217,36 +235,26 @@ export default function ConnectScreen() {
                 maxLength={8}
                 textAlign="center"
                 autoCorrect={false}
+                autoFocus={true}
                 editable={!isConnecting}
               />
 
-              <TextInput
-                style={[styles.input, {
-                  backgroundColor: colors.background,
-                  color: colors.text,
-                  borderColor: colors.border,
-                }]}
-                placeholder="Relay server URL (wss://...)"
-                placeholderTextColor={colors.textMuted}
-                value={relayUrl}
-                onChangeText={setRelayUrl}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-                editable={!isConnecting}
-              />
-
-              <TouchableOpacity
-                style={[styles.connectBtn, { backgroundColor: colors.primary }, isConnecting && styles.btnDisabled]}
-                onPress={handleRelayConnect}
-                disabled={isConnecting || !roomCode.trim() || !relayUrl.trim()}
-              >
-                {isConnecting ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
+              {isConnecting ? (
+                <TouchableOpacity
+                  style={[styles.connectBtn, { backgroundColor: colors.error || '#e74c3c' }]}
+                  onPress={disconnect}
+                >
+                  <Text style={styles.connectBtnText}>Cancel</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.connectBtn, { backgroundColor: colors.primary }]}
+                  onPress={handleRelayConnect}
+                  disabled={!roomCode.trim()}
+                >
                   <Text style={styles.connectBtnText}>Join Room</Text>
-                )}
-              </TouchableOpacity>
+                </TouchableOpacity>
+              )}
             </View>
           </ScrollView>
         )}
@@ -291,17 +299,22 @@ export default function ConnectScreen() {
                 editable={!isConnecting}
               />
 
-              <TouchableOpacity
-                style={[styles.connectBtn, { backgroundColor: colors.primary }, isConnecting && styles.btnDisabled]}
-                onPress={handleDirectConnect}
-                disabled={isConnecting || !directUrl.trim() || !token.trim()}
-              >
-                {isConnecting ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
+              {isConnecting ? (
+                <TouchableOpacity
+                  style={[styles.connectBtn, { backgroundColor: colors.error || '#e74c3c' }]}
+                  onPress={disconnect}
+                >
+                  <Text style={styles.connectBtnText}>Cancel</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.connectBtn, { backgroundColor: colors.primary }]}
+                  onPress={handleDirectConnect}
+                  disabled={!directUrl.trim() || !token.trim()}
+                >
                   <Text style={styles.connectBtnText}>Connect</Text>
-                )}
-              </TouchableOpacity>
+                </TouchableOpacity>
+              )}
             </View>
           </ScrollView>
         )}
@@ -345,6 +358,11 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.sm,
     alignItems: 'center',
     borderRadius: BorderRadius.md,
+  },
+  tabContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   tabText: { fontSize: FontSize.sm, fontWeight: '600' },
 
@@ -397,8 +415,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: Spacing.xl,
   },
-  permIcon: { fontSize: 48, marginBottom: Spacing.lg },
-  permTitle: { fontSize: FontSize.lg, fontWeight: '600', marginBottom: Spacing.sm },
+  permTitle: { fontSize: FontSize.lg, fontWeight: '600', marginTop: Spacing.lg, marginBottom: Spacing.sm },
   permDesc: { fontSize: FontSize.md, textAlign: 'center', lineHeight: 22, marginBottom: Spacing.xl },
   permBtn: {
     paddingHorizontal: Spacing.xl,

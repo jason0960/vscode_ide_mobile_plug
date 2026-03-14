@@ -1,6 +1,6 @@
 # Mobile Copilot Remote
 
-> Control GitHub Copilot from your phone — the **real** agent with full file editing, terminal access, git operations, and streaming responses, all from a mobile browser. **$0 additional cost.**
+> Control GitHub Copilot from your phone — the **real** agent with full file editing, terminal access, git operations, and streaming responses, via a native mobile app or browser PWA. **$0 additional cost.**
 
 <p align="center">
   <img src="https://img.shields.io/badge/VS%20Code-%3E%3D1.95.0-blue" alt="VS Code version" />
@@ -117,7 +117,36 @@ Reload VS Code: `Ctrl+Shift+P` → **Developer: Reload Window**
 
 ## Quick Start
 
-### Same Wi-Fi (simplest)
+### Relay Mode + Mobile App (recommended)
+
+Use the **React Native mobile app** with a central relay server — works across any network without tunnels.
+
+**Terminal 1 — Relay Server:**
+```bash
+cd packages/relay-server
+npm run build && npm start       # Starts on http://localhost:4800
+```
+
+**Terminal 2 — VS Code Extension:**
+```bash
+npm run build                    # Build the extension
+npm run install-ext              # Install into VS Code
+# Reload VS Code, then:
+# Ctrl+Shift+P → Mobile Copilot: Connect Cloud Relay
+# Note the 6-character room code displayed
+```
+
+**Terminal 3 — Mobile App:**
+```bash
+cd packages/mobile-app
+CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start --web --clear   # Metro on port 8081
+```
+
+Open `http://localhost:8081` in a browser (or run on a physical device via Expo Go). Enter the 6-character room code → authenticate → start chatting with full Copilot agent mode.
+
+> **Tip:** Set `mobileCopilot.relayUrl` in VS Code settings if the relay isn't on localhost.
+
+### Same Wi-Fi (browser PWA)
 
 1. `Ctrl+Shift+P` → **Mobile Copilot: Start Server**
 2. Scan the QR code with your phone
@@ -125,7 +154,7 @@ Reload VS Code: `Ctrl+Shift+P` → **Developer: Reload Window**
 
 ### Any Network (tunnel)
 
-For access from anywhere — different Wi-Fi, cellular, etc.
+For the browser PWA from anywhere — different Wi-Fi, cellular, etc.
 
 #### Option A: VS Code Dev Tunnels (recommended, free)
 
@@ -285,15 +314,139 @@ app.js ←──── WebSocket ────→  server.ts     Express + WebSoc
 
 ## Development
 
+### Monorepo Structure
+
+```
+packages/
+  protocol/        — Shared types & JSON-RPC handler (portable, no IDE deps)
+  adapter-core/    — Base server with auth, RPC, session management
+  adapter-vscode/  — VS Code extension: Copilot bridge, relay client, tunnel
+  relay-server/    — Standalone WebSocket relay hub (room-based, 6-char codes)
+  mobile-app/      — React Native Expo app (Zustand, WebSocket, RPC client)
+```
+
+### Install & Build
+
 ```bash
-npm install
+npm install                    # Install all workspaces (run from repo root)
+npm run build                  # Build the VS Code extension only
+npm run build:all              # Build extension + relay server
+npm run build:relay            # Build relay server only
+```
+
+### Running the Full Stack
+
+You need **three components** running to test the relay flow:
+
+#### 1. Relay Server (port 4800)
+
+```bash
+npm run build:relay            # Build first
+npm run start:relay            # Starts on http://localhost:4800
+```
+
+Health check: `curl http://localhost:4800/health`
+List rooms: `curl http://localhost:4800/rooms`
+
+Environment variables:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `4800` | Server listen port |
+| `ROOM_TTL_MS` | `14400000` (4h) | Room inactivity timeout |
+| `MAX_ROOMS` | `1000` | Max concurrent rooms |
+
+#### 2. VS Code Extension
+
+```bash
+npm run build                  # Build extension
+npm run package                # Create .vsix package
+npm run install-ext            # Install into VS Code
+```
+
+Or press **F5** in VS Code to launch the Extension Development Host.
+
+**Required VS Code settings for relay mode:**
+```json
+{
+  "mobileCopilot.relayUrl": "ws://localhost:4800"
+}
+```
+
+Then: `Ctrl+Shift+P` → **Mobile Copilot: Connect Cloud Relay** → shows a 6-char room code.
+
+#### 3. Mobile App (React Native / Expo)
+
+```bash
+npm run start:mobile           # Start from repo root
+# OR
+cd packages/mobile-app
+CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start --web --clear
+```
+
+Metro bundler runs on port `8081`. For web: open `http://localhost:8081` in a browser.
+
+Override the default relay URL at build time:
+```bash
+EXPO_PUBLIC_RELAY_URL=wss://your-relay.example.com npx expo start
+```
+
+Or change it at runtime in the app's **Settings** screen.
+
+### Relay Connection Flow
+
+```
+┌─────────────┐     WS /relay/host      ┌──────────────┐     WS /relay/join?code=X    ┌─────────────┐
+│  VS Code    │ ◄──────────────────────► │ Relay Server │ ◄──────────────────────────► │ Mobile App  │
+│  Extension  │                          │  (port 4800) │                               │ (Expo)      │
+└─────────────┘                          └──────────────┘                               └─────────────┘
+```
+
+1. Extension connects to `/relay/host` → relay creates room, returns 6-char code
+2. User enters code in mobile app's "Relay" tab
+3. Mobile connects to `/relay/join?code=XXXXXX`
+4. Relay sends `relay.joined { hostConnected: true }` to mobile
+5. Mobile sends `{ method: "auth", params: { relay: true } }` through relay to extension
+6. Extension replies with `auth.success { sessionId: "relay" }`
+7. Mobile app transitions from ConnectScreen to the main tabbed UI
+8. All subsequent RPC calls (chat, files, terminal, diagnostics) flow bidirectionally through the relay
+
+**Room codes** are 6 uppercase alphanumeric chars (no ambiguous 0/O/1/I).
+
+**Auto-reconnect:** Extension uses `hostSecret` to rejoin via `/relay/rejoin`. Mobile auto-reconnects after 3s. Fatal codes (4003 auth fail, 4004 room not found, 4008 room expired) stop reconnection.
+
+**Heartbeat:** Relay pings every 30s; mobile sends JSON ping every 25s.
+
+### WebSocket Endpoints (Relay Server)
+
+| Path | Role | Description |
+|------|------|-------------|
+| `ws://host:4800/relay/host` | IDE | Extension connects as host, gets room code back |
+| `ws://host:4800/relay/join?code=XXXX` | Mobile | Client joins room with code |
+| `ws://host:4800/relay/rejoin?code=XXXX&secret=YYYY` | IDE | Host reconnection with secret |
+
+### Extension Watch Mode
+
+```bash
 npm run watch        # Auto-rebuild on save
 # Press F5 in VS Code to launch Extension Development Host
+```
 
-# Package for distribution
+### Package for Distribution
+
+```bash
 npm run build
 npx @vscode/vsce package --no-dependencies --allow-missing-repository
 ```
+
+### Troubleshooting Relay Connections
+
+| Problem | Solution |
+|---------|----------|
+| Mobile stuck on "Connecting..." after entering code | Check VS Code Output → "Mobile Copilot" for relay errors. Verify `mobileCopilot.relayUrl` is set correctly. |
+| "Room not found" (code 4004) | Room code expired or wrong. Get a fresh code from VS Code. |
+| Mobile connects but never authenticates | Extension must be running relay mode. Check that auth.success is being sent back (see console logs). |
+| Relay server won't start | Check port 4800 isn't in use: `ss -tlnp \| grep 4800` |
+| Mobile app can't reach relay from physical device | Use your machine's LAN IP instead of localhost. Update relay URL in app Settings to `ws://192.168.x.x:4800` |
 
 ---
 

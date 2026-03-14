@@ -121,6 +121,7 @@ export class RelayClient {
         }
 
         // Everything else is a message from a mobile client — forward to local handler
+        this.logger.info(`[Relay] Forwarding message to local handler (${raw.length} bytes)`);
         this.onMessage.fire(raw);
       });
 
@@ -150,8 +151,12 @@ export class RelayClient {
    * Send a message to all connected mobile clients via the relay.
    */
   send(data: string): void {
+    console.log(`[MCR-DEBUG relay-client] send called, ws=${!!this.ws}, readyState=${this.ws?.readyState}, data=${data.substring(0, 200)}`);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.logger.info(`[Relay] Sending to relay: ${data.substring(0, 200)}`);
       this.ws.send(data);
+    } else {
+      this.logger.info(`[Relay] Cannot send — ws=${this.ws ? 'exists' : 'null'}, readyState=${this.ws?.readyState}`);
     }
   }
 
@@ -238,6 +243,7 @@ export class RelayClient {
             // fall through
           }
 
+          console.log(`[MCR-DEBUG relay-client reconnect] Firing onMessage: ${raw.substring(0, 200)}`);
           this.onMessage.fire(raw);
         });
 

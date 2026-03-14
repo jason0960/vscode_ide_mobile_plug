@@ -10,15 +10,17 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useAppStore, DiagnosticInfo } from '../store/AppStore';
 import { Colors, Spacing, FontSize, BorderRadius, ThemeColors } from '../theme';
 
-const SEVERITY_ICONS: Record<string, string> = {
-  error: '✕',
-  warning: '⚠',
-  info: 'ℹ',
-  hint: '💡',
+const SEVERITY_ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
+  error: 'close-circle',
+  warning: 'warning',
+  info: 'information-circle',
+  hint: 'bulb-outline',
 };
 
 const SEVERITY_COLORS = (colors: ThemeColors) => ({
@@ -61,12 +63,16 @@ export default function DiagnosticsScreen() {
 
   const renderItem = ({ item }: { item: DiagnosticInfo }) => {
     const sevColor = sevColors[item.severity as keyof typeof sevColors] || colors.textSecondary;
+    const sevIcon = SEVERITY_ICONS[item.severity] || 'help-circle-outline';
     return (
       <View style={[styles.diagItem, { borderBottomColor: colors.border }]}>
         <View style={styles.diagHeader}>
-          <Text style={[styles.severity, { color: sevColor }]}>
-            {SEVERITY_ICONS[item.severity] || '•'} {item.severity}
-          </Text>
+          <View style={styles.severityRow}>
+            <Ionicons name={sevIcon as any} size={16} color={sevColor} />
+            <Text style={[styles.severity, { color: sevColor }]}>
+              {item.severity}
+            </Text>
+          </View>
           <Text style={[styles.location, { color: colors.textSecondary }]}>
             {item.file}:{item.line}
           </Text>
@@ -97,23 +103,29 @@ export default function DiagnosticsScreen() {
           style={[styles.filterBtn, filter === 'error' && { backgroundColor: colors.error }]}
           onPress={() => setFilter('error')}
         >
-          <Text style={[styles.filterText, { color: filter === 'error' ? '#fff' : colors.error }]}>
-            ✕ {diagnosticsSummary.errors}
-          </Text>
+          <View style={styles.filterContent}>
+            <Ionicons name="close-circle" size={14} color={filter === 'error' ? '#fff' : colors.error} />
+            <Text style={[styles.filterText, { color: filter === 'error' ? '#fff' : colors.error }]}>
+              {diagnosticsSummary.errors}
+            </Text>
+          </View>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.filterBtn, filter === 'warning' && { backgroundColor: colors.warning }]}
           onPress={() => setFilter('warning')}
         >
-          <Text style={[styles.filterText, { color: filter === 'warning' ? '#fff' : colors.warning }]}>
-            ⚠ {diagnosticsSummary.warnings}
-          </Text>
+          <View style={styles.filterContent}>
+            <Ionicons name="warning" size={14} color={filter === 'warning' ? '#fff' : colors.warning} />
+            <Text style={[styles.filterText, { color: filter === 'warning' ? '#fff' : colors.warning }]}>
+              {diagnosticsSummary.warnings}
+            </Text>
+          </View>
         </TouchableOpacity>
 
         <View style={{ flex: 1 }} />
 
         <TouchableOpacity onPress={refresh} style={styles.refreshBtn}>
-          <Text style={[styles.refreshText, { color: colors.primary }]}>↻</Text>
+          <Ionicons name="refresh" size={20} color={colors.primary} />
         </TouchableOpacity>
       </View>
 
@@ -121,7 +133,7 @@ export default function DiagnosticsScreen() {
         <ActivityIndicator style={{ marginTop: 40 }} color={colors.primary} />
       ) : filteredDiags.length === 0 ? (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyEmoji}>🎉</Text>
+          <Ionicons name="checkmark-circle-outline" size={48} color={colors.success} />
           <Text style={[styles.emptyText, { color: colors.textMuted }]}>
             {diagnostics.length === 0 ? 'No diagnostics — looking good!' : 'No matching diagnostics'}
           </Text>
@@ -132,6 +144,14 @@ export default function DiagnosticsScreen() {
           renderItem={renderItem}
           keyExtractor={(item, i) => `${item.file}:${item.line}:${i}`}
           showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={loading}
+              onRefresh={refresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          }
         />
       )}
     </View>
@@ -153,9 +173,13 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.xs,
     borderRadius: BorderRadius.full,
   },
+  filterContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
   filterText: { fontSize: FontSize.sm, fontWeight: '600' },
-  refreshBtn: { padding: Spacing.xs },
-  refreshText: { fontSize: 22 },
+  refreshBtn: { padding: Spacing.xs, minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   diagItem: {
     paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
@@ -166,11 +190,15 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: Spacing.xs,
   },
+  severityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
   severity: { fontSize: FontSize.sm, fontWeight: '600' },
   location: { fontSize: FontSize.xs },
-  message: { fontSize: FontSize.md, lineHeight: 22 },
+  message: { fontSize: FontSize.md, lineHeight: 24 },
   source: { fontSize: FontSize.xs, marginTop: Spacing.xs },
   emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  emptyEmoji: { fontSize: 48, marginBottom: Spacing.md },
-  emptyText: { fontSize: FontSize.md },
+  emptyText: { fontSize: FontSize.md, marginTop: Spacing.lg },
 });

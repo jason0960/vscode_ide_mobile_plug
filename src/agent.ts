@@ -142,11 +142,41 @@ export class AgentOperations {
     return results;
   }
 
+  // ── Command Safety ──────────────────────────────────────────────
+
+  private static readonly BLOCKED_COMMANDS = [
+    /\brm\s+(-rf?|--recursive)\s+[\/~]/, // rm -rf / or ~
+    /\bmkfs\b/, /\bdd\b.*\bof=\/dev/, /\bformat\b/,
+    /\bcurl\b.*\|\s*(ba)?sh/, // curl | sh
+    /\bwget\b.*\|\s*(ba)?sh/,
+    /\bchmod\s+777\s+\//, // chmod 777 /
+    /\bchown\b.*\s+\//, // chown / (root filesystem)
+    /\breboot\b/, /\bshutdown\b/, /\bhalt\b/,
+    /\b(nc|ncat|netcat)\b.*-[el]/, // reverse shells
+    /\beval\b/, /\bsource\s+\/dev\/tcp/,
+  ];
+
+  private validateCommand(command: string): void {
+    if (!command || !command.trim()) {
+      throw new Error('Empty command');
+    }
+    if (command.length > 2000) {
+      throw new Error('Command too long (max 2000 chars)');
+    }
+    for (const pattern of AgentOperations.BLOCKED_COMMANDS) {
+      if (pattern.test(command)) {
+        throw new Error(`Blocked: command matches dangerous pattern`);
+      }
+    }
+  }
+
   // ─── Terminal Operations ────────────────────────────────────────
 
   async runCommand(params: TerminalRunRequest): Promise<{ terminalName: string; sent: boolean; output?: string; exitCode?: number }> {
     const name = params.terminalName || 'Mobile Copilot';
     const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    this.validateCommand(params.command);
 
     // Use child_process.exec to capture output
     try {
@@ -283,17 +313,24 @@ export class AgentOperations {
   // ─── Utility ────────────────────────────────────────────────────
 
   private resolveWorkspacePath(relativePath: string): string {
-    // If already absolute, return as-is
-    if (path.isAbsolute(relativePath)) {
-      return relativePath;
-    }
-
     const folders = vscode.workspace.workspaceFolders;
     if (!folders || folders.length === 0) {
       throw new Error('No workspace folder open');
     }
 
-    return path.join(folders[0].uri.fsPath, relativePath);
+    const wsRoot = folders[0].uri.fsPath;
+    // Always resolve relative to workspace — never allow absolute paths
+    const resolved = path.isAbsolute(relativePath)
+      ? relativePath
+      : path.join(wsRoot, relativePath);
+    const canonical = path.resolve(resolved);
+
+    // Ensure the resolved path is within the workspace
+    if (!canonical.startsWith(wsRoot + path.sep) && canonical !== wsRoot) {
+      throw new Error(`Path traversal blocked: ${relativePath} resolves outside workspace`);
+    }
+
+    return canonical;
   }
 
   /**

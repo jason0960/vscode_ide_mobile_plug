@@ -113,6 +113,24 @@ export abstract class BaseServer {
       res.json({ status: 'ok', version: '0.2.0', clients: this.clients.size });
     });
 
+    // Dev pairing info — returns token + pairing URL (localhost only, requires DEBUG_PAIR=1 env flag)
+    this.app.get('/api/pair-info', async (req, res) => {
+      if (process.env.DEBUG_PAIR !== '1') {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      // Strict loopback check — strip IPv4-mapped IPv6 prefix before comparing
+      const rawIp = (req.ip || req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+      const isLoopback = rawIp === '127.0.0.1' || rawIp === '::1';
+      if (!isLoopback) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const token = await this.auth.getToken();
+      const serverUrl = `http://localhost:${this.port}`;
+      // Restrict CORS for this sensitive endpoint to same origin only
+      res.header('Access-Control-Allow-Origin', `http://localhost:${this.port}`);
+      res.json({ token, pairingUrl: `${serverUrl}/pair?token=${token}`, wsUrl: `ws://localhost:${this.port}/ws` });
+    });
+
     // Auth endpoint — validate token, create session
     this.app.get('/api/auth', async (req, res) => {
       const token = req.query.token as string;
