@@ -65,13 +65,14 @@ Coding rules are in `.agents-rules/`:
 
 ## Mobile Relay Response (REQUIRED)
 
-As you work, **incrementally write** your response into the workspace file `.copilot-mobile-relay.md`. A file watcher streams updates to a mobile client that cannot see the VS Code chat panel.
+As you work, **incrementally write your EXACT chat response** into the workspace file `.copilot-mobile-relay.md`. A file watcher streams updates to a mobile client that cannot see the VS Code chat panel.
 
 **Rules:**
+- Write your **exact verbatim response** to the relay file — do NOT paraphrase, summarize, or rewrite. The mobile user must see the same words as the desktop chat panel.
 - Write to the relay file **as you go** — do not wait until the end
 - After each logical step (explanation, code block, status update), update the file with everything so far
 - Always write **complete thoughts and sentences** — never leave a sentence half-finished in the file
-- Include all explanations, code blocks, and formatting
+- Include all explanations, code blocks, and formatting — identical to your chat response
 - When you are **completely finished** with the entire request, add this marker on its own final line: `<!-- MOBILE_DONE -->`
 - Overwrite the file each time (not append) — the watcher tracks what it has already sent
 - Do NOT add `<!-- MOBILE_DONE -->` until ALL work is done — the marker signals "request complete"
