@@ -24,6 +24,12 @@ import {
   generateRoomCode,
   RelayServerInstance,
   Room,
+  DEFAULT_MAX_MESSAGE_SIZE,
+  DEFAULT_RATE_LIMIT_MAX,
+  DEFAULT_RATE_LIMIT_WINDOW_MS,
+  DEFAULT_MAX_CLIENTS_PER_ROOM,
+  DEFAULT_MAX_CONNECTIONS_PER_IP,
+  DEFAULT_CONNECTION_RATE_WINDOW_MS,
 } from '../src/index';
 
 // ─── Test Helpers ───────────────────────────────────────────────
@@ -94,6 +100,7 @@ describe('Relay Server (production code)', () => {
       port: 0,             // random port — no collisions
       maxRooms: 5,         // low cap for capacity tests
       heartbeatIntervalMs: 60_000, // slow heartbeat so it doesn't interfere
+      maxConnectionsPerIp: 200,    // generous — many tests create connections
     });
     port = await relay.start();
   });
@@ -453,5 +460,374 @@ describe('Relay Server (production code)', () => {
       }
       expect(codes.size).toBe(20);
     });
+  });
+});
+
+// ─── DoS Protection Tests ───────────────────────────────────────
+// Uses a separate server instance with aggressive limits so tests
+// run quickly and deterministically.
+
+describe('Relay Server DoS Protections', () => {
+  let relay: RelayServerInstance;
+  let port: number;
+  let openSockets: WebSocket[] = [];
+
+  // Very tight limits for testing
+  const MAX_MSG_SIZE = 256;           // 256 bytes
+  const RATE_MAX = 5;                 // 5 messages per window
+  const RATE_WINDOW = 10_000;         // 10s window
+  const MAX_CLIENTS = 2;             // 2 clients per room
+  const MAX_CONN_PER_IP = 30;         // generous — mostly testing message limits
+  const CONN_RATE_WINDOW = 60_000;
+
+  beforeAll(async () => {
+    relay = createRelayServer({
+      port: 0,
+      maxRooms: 100,
+      heartbeatIntervalMs: 60_000,
+      maxMessageSize: MAX_MSG_SIZE,
+      rateLimitMax: RATE_MAX,
+      rateLimitWindowMs: RATE_WINDOW,
+      maxClientsPerRoom: MAX_CLIENTS,
+      maxConnectionsPerIp: MAX_CONN_PER_IP,
+      connectionRateWindowMs: CONN_RATE_WINDOW,
+    });
+    port = await relay.start();
+  });
+
+  afterEach(() => {
+    for (const ws of openSockets) {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    }
+    openSockets = [];
+    relay.rooms.clear();
+  });
+
+  afterAll(async () => {
+    await relay.stop();
+  });
+
+  function track(b: BufferedWs): BufferedWs {
+    openSockets.push(b.ws);
+    return b;
+  }
+
+  // ─── Exported Constants ─────────────────────────────────────
+
+  describe('exported default constants', () => {
+    it('DEFAULT_MAX_MESSAGE_SIZE is 1 MB', () => {
+      expect(DEFAULT_MAX_MESSAGE_SIZE).toBe(1 * 1024 * 1024);
+    });
+
+    it('DEFAULT_RATE_LIMIT_MAX is 60', () => {
+      expect(DEFAULT_RATE_LIMIT_MAX).toBe(60);
+    });
+
+    it('DEFAULT_RATE_LIMIT_WINDOW_MS is 10_000', () => {
+      expect(DEFAULT_RATE_LIMIT_WINDOW_MS).toBe(10_000);
+    });
+
+    it('DEFAULT_MAX_CLIENTS_PER_ROOM is 10', () => {
+      expect(DEFAULT_MAX_CLIENTS_PER_ROOM).toBe(10);
+    });
+
+    it('DEFAULT_MAX_CONNECTIONS_PER_IP is 20', () => {
+      expect(DEFAULT_MAX_CONNECTIONS_PER_IP).toBe(20);
+    });
+
+    it('DEFAULT_CONNECTION_RATE_WINDOW_MS is 60_000', () => {
+      expect(DEFAULT_CONNECTION_RATE_WINDOW_MS).toBe(60_000);
+    });
+  });
+
+  // ─── Message Size Limits ────────────────────────────────────
+
+  describe('message size limits', () => {
+    it('host message under limit is forwarded normally', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      const smallMsg = JSON.stringify({ type: 'test', data: 'ok' });
+      host.ws.send(smallMsg);
+      const received = await client.waitForMessage();
+      expect(received.type).toBe('test');
+    });
+
+    it('host oversized message closes connection with 4013', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      await host.waitForMessage(); // relay.room_created
+
+      // Send a message larger than MAX_MSG_SIZE (256 bytes)
+      const oversizedMsg = 'X'.repeat(MAX_MSG_SIZE + 100);
+      const closeP = waitForClose(host.ws);
+      host.ws.send(oversizedMsg);
+      const { code } = await closeP;
+      // ws library enforces maxPayload at transport level → 1009
+      // OR our app-layer check → 4013
+      expect([1009, 4013]).toContain(code);
+    });
+
+    it('client oversized message closes connection', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      const oversizedMsg = 'X'.repeat(MAX_MSG_SIZE + 100);
+      const closeP = waitForClose(client.ws);
+      client.ws.send(oversizedMsg);
+      const { code } = await closeP;
+      expect([1009, 4013]).toContain(code);
+    });
+  });
+
+  // ─── Per-Socket Rate Limiting ─────────────────────────────────
+
+  describe('per-socket rate limiting', () => {
+    it('allows messages up to the rate limit', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      // Send exactly RATE_MAX messages — all should arrive
+      for (let i = 0; i < RATE_MAX; i++) {
+        host.ws.send(JSON.stringify({ type: 'test', seq: i }));
+      }
+
+      for (let i = 0; i < RATE_MAX; i++) {
+        const msg = await client.waitForMessage();
+        expect(msg.seq).toBe(i);
+      }
+    });
+
+    it('host gets error after exceeding rate limit', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      // Exhaust the rate limit
+      for (let i = 0; i < RATE_MAX; i++) {
+        host.ws.send(JSON.stringify({ type: 'test', seq: i }));
+      }
+
+      // Drain forwarded messages from client
+      for (let i = 0; i < RATE_MAX; i++) {
+        await client.waitForMessage();
+      }
+
+      // Next message should be rate-limited — host gets error back
+      host.ws.send(JSON.stringify({ type: 'test', seq: 'over-limit' }));
+      const errorMsg = await host.waitForMessage();
+      expect(errorMsg.type).toBe('error');
+      expect(errorMsg.code).toBe(4029);
+      expect(errorMsg.message).toBe('Rate limit exceeded');
+    });
+
+    it('client gets error after exceeding rate limit', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      // Exhaust the rate limit
+      for (let i = 0; i < RATE_MAX; i++) {
+        client.ws.send(JSON.stringify({ type: 'test', seq: i }));
+      }
+
+      // Drain forwarded messages from host
+      for (let i = 0; i < RATE_MAX; i++) {
+        await host.waitForMessage();
+      }
+
+      // Next message should be rate-limited
+      client.ws.send(JSON.stringify({ type: 'test', seq: 'over-limit' }));
+      const errorMsg = await client.waitForMessage();
+      expect(errorMsg.type).toBe('error');
+      expect(errorMsg.code).toBe(4029);
+    });
+
+    it('rate-limited messages are not forwarded to the other side', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      // Exhaust rate limit
+      for (let i = 0; i < RATE_MAX; i++) {
+        host.ws.send(JSON.stringify({ type: 'test', seq: i }));
+      }
+      for (let i = 0; i < RATE_MAX; i++) {
+        await client.waitForMessage();
+      }
+
+      // Send over-limit message
+      host.ws.send(JSON.stringify({ type: 'test', seq: 'should-not-arrive' }));
+
+      // Host gets rate limit error
+      await host.waitForMessage();
+
+      // Now send a legitimate message after the window would have had some room
+      // We verify nothing extra arrived at client by sending a marker and checking it's next
+      // Wait briefly, then send a within-limit new message
+      await new Promise(r => setTimeout(r, 50));
+
+      // Client should NOT have received the rate-limited message
+      // Verify by checking the buffered messages array is empty
+      expect(client.messages.length).toBe(0);
+    });
+  });
+
+  // ─── Per-Room Client Cap ──────────────────────────────────────
+
+  describe('per-room client cap', () => {
+    it('allows clients up to the limit', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client1 = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      const joined1 = await client1.waitForMessage();
+      expect(joined1.type).toBe('relay.joined');
+
+      const client2 = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      const joined2 = await client2.waitForMessage();
+      expect(joined2.type).toBe('relay.joined');
+    });
+
+    it('rejects client when room is full with 4011', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      // Fill room to MAX_CLIENTS (2)
+      for (let i = 0; i < MAX_CLIENTS; i++) {
+        const c = track(await connectWs(port, `/relay/join?code=${created.code}`));
+        await c.waitForMessage(); // relay.joined
+      }
+
+      // 3rd client should be rejected
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/relay/join?code=${created.code}`);
+      openSockets.push(ws);
+      const { code } = await waitForClose(ws);
+      expect(code).toBe(4011);
+    });
+
+    it('client can join after another leaves', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+
+      const client1 = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client1.waitForMessage(); // relay.joined
+
+      const client2 = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      await client2.waitForMessage(); // relay.joined
+
+      // Room is now full — disconnect client1
+      const closeP = new Promise<void>(r => client1.ws.once('close', () => r()));
+      client1.ws.close();
+      await closeP;
+
+      // Give server a moment to process
+      await new Promise(r => setTimeout(r, 50));
+
+      // New client can now join
+      const client3 = track(await connectWs(port, `/relay/join?code=${created.code}`));
+      const joined3 = await client3.waitForMessage();
+      expect(joined3.type).toBe('relay.joined');
+    });
+  });
+
+  // ─── Connection Rate Limiting ─────────────────────────────────
+
+  describe('connection rate limiting', () => {
+    it('rejects connections that exceed the IP rate limit', async () => {
+      // Create a separate server with very low connection rate limit
+      const strictRelay = createRelayServer({
+        port: 0,
+        maxRooms: 100,
+        heartbeatIntervalMs: 60_000,
+        maxConnectionsPerIp: 3,
+        connectionRateWindowMs: 60_000,
+      });
+      const strictPort = await strictRelay.start();
+
+      const sockets: WebSocket[] = [];
+      try {
+        // 3 connections should succeed
+        for (let i = 0; i < 3; i++) {
+          const b = await connectWs(strictPort, '/relay/host');
+          sockets.push(b.ws);
+          await b.waitForMessage(); // relay.room_created
+        }
+
+        // 4th connection should be rejected with 4029
+        const ws = new WebSocket(`ws://127.0.0.1:${strictPort}/relay/host`);
+        sockets.push(ws);
+        const { code } = await waitForClose(ws);
+        expect(code).toBe(4029);
+      } finally {
+        for (const ws of sockets) {
+          if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+            ws.close();
+          }
+        }
+        await strictRelay.stop();
+      }
+    }, 15000);
+  });
+
+  // ─── Rejoin Host Rate Limiting ────────────────────────────────
+
+  describe('rejoin host rate limiting', () => {
+    it('rate limits messages from rejoined host', async () => {
+      const host = track(await connectWs(port, '/relay/host'));
+      const created = await host.waitForMessage();
+      const { code: roomCode, hostSecret } = created;
+
+      const client = track(await connectWs(port, `/relay/join?code=${roomCode}`));
+      await client.waitForMessage(); // relay.joined
+      await host.waitForMessage(); // relay.client_joined
+
+      // Disconnect host
+      const closeP = new Promise<void>(r => host.ws.once('close', () => r()));
+      host.ws.close();
+      await closeP;
+      await client.waitForMessage(); // relay.host_disconnected
+
+      // Rejoin
+      const newHost = track(await connectWs(port, `/relay/rejoin?code=${roomCode}&secret=${hostSecret}`));
+      await newHost.waitForMessage(); // relay.rejoined
+      await client.waitForMessage(); // relay.host_reconnected
+
+      // Exhaust rate limit on new host
+      for (let i = 0; i < RATE_MAX; i++) {
+        newHost.ws.send(JSON.stringify({ type: 'test', seq: i }));
+      }
+      for (let i = 0; i < RATE_MAX; i++) {
+        await client.waitForMessage();
+      }
+
+      // Over-limit → error
+      newHost.ws.send(JSON.stringify({ type: 'test', seq: 'over' }));
+      const errorMsg = await newHost.waitForMessage();
+      expect(errorMsg.type).toBe('error');
+      expect(errorMsg.code).toBe(4029);
+    }, 10000);
   });
 });

@@ -45,12 +45,37 @@ export function generateRoomCode(existingRooms: Map<string, Room>): string {
 
 // ─── Configuration ──────────────────────────────────────────────
 
+/** Default max message size: 1 MB */
+export const DEFAULT_MAX_MESSAGE_SIZE = 1 * 1024 * 1024;
+/** Default rate limit: 60 messages per window */
+export const DEFAULT_RATE_LIMIT_MAX = 60;
+/** Default rate limit window: 10 seconds */
+export const DEFAULT_RATE_LIMIT_WINDOW_MS = 10_000;
+/** Default max clients per room */
+export const DEFAULT_MAX_CLIENTS_PER_ROOM = 10;
+/** Default max connections per IP per window */
+export const DEFAULT_MAX_CONNECTIONS_PER_IP = 20;
+/** Default connection rate window: 60 seconds */
+export const DEFAULT_CONNECTION_RATE_WINDOW_MS = 60_000;
+
 export interface RelayServerOptions {
   port?: number;
   roomTtlMs?: number;
   maxRooms?: number;
   heartbeatIntervalMs?: number;
   debugRelay?: boolean;
+  /** Maximum WebSocket message size in bytes (default: 1 MB) */
+  maxMessageSize?: number;
+  /** Max messages per socket per rate-limit window (default: 60) */
+  rateLimitMax?: number;
+  /** Rate limit window in ms (default: 10 000) */
+  rateLimitWindowMs?: number;
+  /** Max client connections per room (default: 10) */
+  maxClientsPerRoom?: number;
+  /** Max new WS connections per IP per window (default: 20) */
+  maxConnectionsPerIp?: number;
+  /** Connection rate window in ms (default: 60 000) */
+  connectionRateWindowMs?: number;
 }
 
 // ─── Relay Server Instance ──────────────────────────────────────
@@ -76,12 +101,87 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
   const maxRooms = opts.maxRooms ?? parseInt(process.env.MAX_ROOMS || '1000', 10);
   const heartbeatIntervalMs = opts.heartbeatIntervalMs ?? 30_000;
   const debugRelay = opts.debugRelay ?? process.env.DEBUG_RELAY === '1';
+  const maxMessageSize = opts.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE;
+  const rateLimitMax = opts.rateLimitMax ?? DEFAULT_RATE_LIMIT_MAX;
+  const rateLimitWindowMs = opts.rateLimitWindowMs ?? DEFAULT_RATE_LIMIT_WINDOW_MS;
+  const maxClientsPerRoom = opts.maxClientsPerRoom ?? DEFAULT_MAX_CLIENTS_PER_ROOM;
+  const maxConnectionsPerIp = opts.maxConnectionsPerIp ?? DEFAULT_MAX_CONNECTIONS_PER_IP;
+  const connectionRateWindowMs = opts.connectionRateWindowMs ?? DEFAULT_CONNECTION_RATE_WINDOW_MS;
 
   // ─── State ──────────────────────────────────────────────────
 
   const rooms = new Map<string, Room>();
   const wsToRoom = new Map<WebSocket, { roomCode: string; role: 'host' | 'client' }>();
   const alive = new Map<WebSocket, boolean>();
+
+  // ─── Rate Limiting State ─────────────────────────────────────
+
+  /** Per-socket sliding window: timestamps of recent messages */
+  const messageTimestamps = new Map<WebSocket, number[]>();
+
+  /** Per-IP connection rate: timestamps of recent connections */
+  const connectionTimestamps = new Map<string, number[]>();
+
+  /**
+   * Returns true if the socket has exceeded its message rate limit.
+   * Mutates the timestamps array (appends current time, prunes old).
+   */
+  function isRateLimited(ws: WebSocket): boolean {
+    const now = Date.now();
+    let timestamps = messageTimestamps.get(ws);
+    if (!timestamps) {
+      timestamps = [];
+      messageTimestamps.set(ws, timestamps);
+    }
+    // Prune timestamps outside the window
+    const cutoff = now - rateLimitWindowMs;
+    while (timestamps.length > 0 && timestamps[0] <= cutoff) {
+      timestamps.shift();
+    }
+    if (timestamps.length >= rateLimitMax) {
+      return true;
+    }
+    timestamps.push(now);
+    return false;
+  }
+
+  /**
+   * Returns true if this IP has exceeded its connection rate limit.
+   */
+  function isConnectionRateLimited(ip: string): boolean {
+    const now = Date.now();
+    let timestamps = connectionTimestamps.get(ip);
+    if (!timestamps) {
+      timestamps = [];
+      connectionTimestamps.set(ip, timestamps);
+    }
+    const cutoff = now - connectionRateWindowMs;
+    while (timestamps.length > 0 && timestamps[0] <= cutoff) {
+      timestamps.shift();
+    }
+    if (timestamps.length >= maxConnectionsPerIp) {
+      return true;
+    }
+    timestamps.push(now);
+    return false;
+  }
+
+  /** Check message size. Returns true if oversized. */
+  function isOversized(data: WebSocket.Data): boolean {
+    if (typeof data === 'string') return Buffer.byteLength(data) > maxMessageSize;
+    if (Buffer.isBuffer(data)) return data.length > maxMessageSize;
+    if (Array.isArray(data)) {
+      let total = 0;
+      for (const buf of data) total += buf.length;
+      return total > maxMessageSize;
+    }
+    return false;
+  }
+
+  /** Clean up rate-limiting state for a disconnected socket */
+  function cleanupSocket(ws: WebSocket): void {
+    messageTimestamps.delete(ws);
+  }
 
   function log(msg: string): void {
     console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -124,9 +224,20 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
 
   // ─── WebSocket Server ─────────────────────────────────────────
 
-  const wss = new WebSocketServer({ server: httpServer });
+  const wss = new WebSocketServer({ server: httpServer, maxPayload: maxMessageSize });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+    // ─── Connection rate limiting per IP ──────────────────────
+    const ip = req.headers['x-forwarded-for']?.toString().split(',')[0].trim()
+      || req.socket.remoteAddress
+      || 'unknown';
+
+    if (isConnectionRateLimited(ip)) {
+      log(`[RATE LIMIT] Connection rate exceeded for IP ${ip}`);
+      ws.close(4029, 'Too many connections');
+      return;
+    }
+
     const parsedUrl = url.parse(req.url || '', true);
     const pathname = parsedUrl.pathname || '';
 
@@ -187,6 +298,16 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
     log(`[Room ${code}] Created by host`);
 
     ws.on('message', (data) => {
+      if (isOversized(data)) {
+        log(`[Room ${code}] Host message rejected — oversized`);
+        ws.close(4013, 'Message too large');
+        return;
+      }
+      if (isRateLimited(ws)) {
+        log(`[Room ${code}] Host message rejected — rate limited`);
+        ws.send(JSON.stringify({ type: 'error', code: 4029, message: 'Rate limit exceeded' }));
+        return;
+      }
       const raw = data.toString();
       room.lastActivity = new Date().toISOString();
       if (debugRelay) { log(`[Room ${code}] HOST→CLIENTS (${raw.length} bytes): ${raw.substring(0, 300)}`); }
@@ -217,6 +338,7 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
       log(`[Room ${code}] Host disconnected`);
       wsToRoom.delete(ws);
       alive.delete(ws);
+      cleanupSocket(ws);
 
       for (const client of room.clients) {
         if (client.readyState === WebSocket.OPEN) {
@@ -247,6 +369,12 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
       return;
     }
 
+    if (room.clients.size >= maxClientsPerRoom) {
+      log(`[Room ${code}] Client rejected — room full (${room.clients.size}/${maxClientsPerRoom})`);
+      ws.close(4011, 'Room full');
+      return;
+    }
+
     room.clients.add(ws);
     room.lastActivity = new Date().toISOString();
     wsToRoom.set(ws, { roomCode: code, role: 'client' });
@@ -267,6 +395,16 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
     }
 
     ws.on('message', (data) => {
+      if (isOversized(data)) {
+        log(`[Room ${code}] Client message rejected — oversized`);
+        ws.close(4013, 'Message too large');
+        return;
+      }
+      if (isRateLimited(ws)) {
+        log(`[Room ${code}] Client message rejected — rate limited`);
+        ws.send(JSON.stringify({ type: 'error', code: 4029, message: 'Rate limit exceeded' }));
+        return;
+      }
       const raw = data.toString();
       room.lastActivity = new Date().toISOString();
       if (debugRelay) { log(`[Room ${code}] CLIENT→HOST (${raw.length} bytes): ${raw.substring(0, 300)}`); }
@@ -283,6 +421,7 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
       room.clients.delete(ws);
       wsToRoom.delete(ws);
       alive.delete(ws);
+      cleanupSocket(ws);
       log(`[Room ${code}] Client left (${room.clients.size} remaining)`);
 
       if (room.host && room.host.readyState === WebSocket.OPEN) {
@@ -339,6 +478,16 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
     }
 
     ws.on('message', (data) => {
+      if (isOversized(data)) {
+        log(`[Room ${code}] Host rejoin message rejected — oversized`);
+        ws.close(4013, 'Message too large');
+        return;
+      }
+      if (isRateLimited(ws)) {
+        log(`[Room ${code}] Host rejoin message rejected — rate limited`);
+        ws.send(JSON.stringify({ type: 'error', code: 4029, message: 'Rate limit exceeded' }));
+        return;
+      }
       const raw = data.toString();
       room.lastActivity = new Date().toISOString();
 
@@ -353,6 +502,7 @@ export function createRelayServer(opts: RelayServerOptions = {}): RelayServerIns
       log(`[Room ${code}] Host disconnected (rejoin)`);
       wsToRoom.delete(ws);
       alive.delete(ws);
+      cleanupSocket(ws);
       room.host = null;
 
       for (const client of room.clients) {
