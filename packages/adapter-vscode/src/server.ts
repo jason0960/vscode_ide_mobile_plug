@@ -528,34 +528,7 @@ export class VsCodeServer extends BaseServer {
 
     this.rpc.onRequest('git.restoreFiles', async (params) => {
       const files = params?.files as string[];
-      if (!files || files.length === 0) {
-        return { restored: 0, message: 'No files specified' };
-      }
-      const wsFolder = vscode.workspace.workspaceFolders?.[0];
-      if (!wsFolder) throw new Error('No workspace folder open');
-
-      const { execFileSync } = require('child_process');
-      const results: string[] = [];
-      for (const filePath of files) {
-        try {
-          const status = execFileSync('git', ['status', '--porcelain', '--', filePath], {
-            cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
-          }).trim();
-          if (status.startsWith('??')) {
-            const nodePath = require('path');
-            const absPath = nodePath.resolve(wsFolder.uri.fsPath, filePath);
-            if (!absPath.startsWith(wsFolder.uri.fsPath)) throw new Error('Path traversal blocked');
-            require('fs').unlinkSync(absPath);
-          } else {
-            execFileSync('git', ['restore', '--', filePath], { cwd: wsFolder.uri.fsPath });
-            try { execFileSync('git', ['restore', '--staged', '--', filePath], { cwd: wsFolder.uri.fsPath }); } catch { /* ignore */ }
-          }
-          results.push(filePath);
-        } catch (err: any) {
-          this.logger.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
-        }
-      }
-      return { restored: results.length, files: results };
+      return this.agent.gitRestoreFiles(files || []);
     });
 
     // Selectively revert specific diff hunks from a file
@@ -563,79 +536,7 @@ export class VsCodeServer extends BaseServer {
       const filePath = params?.filePath as string;
       const hunkIndices = params?.hunkIndices as number[];
       const fullDiff = params?.diff as string;
-
-      if (!filePath || !hunkIndices?.length || !fullDiff) {
-        return { success: false, message: 'Missing required parameters (filePath, hunkIndices, diff)' };
-      }
-
-      const wsFolder = vscode.workspace.workspaceFolders?.[0];
-      if (!wsFolder) throw new Error('No workspace folder open');
-
-      const { execFileSync } = require('child_process');
-      const fs = require('fs');
-      const nodePath = require('path');
-      const os = require('os');
-
-      // Parse the unified diff into header lines + individual hunks
-      const lines = fullDiff.split('\n');
-      const headerLines: string[] = [];
-      const hunks: { header: string; lines: string[] }[] = [];
-      let currentHunk: { header: string; lines: string[] } | null = null;
-
-      for (const line of lines) {
-        if (line.startsWith('@@')) {
-          if (currentHunk) hunks.push(currentHunk);
-          currentHunk = { header: line, lines: [] };
-        } else if (currentHunk) {
-          currentHunk.lines.push(line);
-        } else {
-          headerLines.push(line);
-        }
-      }
-      if (currentHunk) hunks.push(currentHunk);
-
-      // Ensure we have a valid diff --git header for git apply
-      if (!headerLines.some(l => l.startsWith('diff --git'))) {
-        headerLines.unshift(`diff --git a/${filePath} b/${filePath}`);
-      }
-      if (!headerLines.some(l => l.startsWith('---'))) {
-        headerLines.push(`--- a/${filePath}`);
-      }
-      if (!headerLines.some(l => l.startsWith('+++'))) {
-        headerLines.push(`+++ b/${filePath}`);
-      }
-
-      // Build a patch containing only the hunks to revert
-      const patchLines = [...headerLines];
-      for (const idx of hunkIndices) {
-        if (idx >= 0 && idx < hunks.length) {
-          patchLines.push(hunks[idx].header);
-          patchLines.push(...hunks[idx].lines);
-        }
-      }
-
-      const tmpFile = nodePath.join(os.tmpdir(), `mobile-copilot-revert-${Date.now()}.patch`);
-      fs.writeFileSync(tmpFile, patchLines.join('\n') + '\n');
-
-      try {
-        execFileSync('git', ['apply', '--reverse', tmpFile], {
-          cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
-        });
-        return { success: true, reverted: hunkIndices.length };
-      } catch (err: any) {
-        // Fallback: try with --3way for better conflict handling
-        try {
-          execFileSync('git', ['apply', '--reverse', '--3way', tmpFile], {
-            cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
-          });
-          return { success: true, reverted: hunkIndices.length };
-        } catch (err2: any) {
-          this.logger.warn(`[Git] revertHunks failed for ${filePath}: ${err2.message}`);
-          return { success: false, message: `Failed to revert hunks: ${err2.message}` };
-        }
-      } finally {
-        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-      }
+      return this.agent.gitRevertHunks(filePath, hunkIndices, fullDiff);
     });
 
     this.rpc.onRequest('git.restoreChanges', async (params) => {
@@ -644,27 +545,10 @@ export class VsCodeServer extends BaseServer {
         ? files
         : Array.from(this.agentModifiedFiles);
 
-      if (filesToRestore.length === 0) {
-        return { restored: 0, message: 'No modified files to restore' };
-      }
-
-      const wsFolder = vscode.workspace.workspaceFolders?.[0];
-      if (!wsFolder) throw new Error('No workspace folder open');
-
-      const results: string[] = [];
-      for (const filePath of filesToRestore) {
-        try {
-          const { execFileSync } = require('child_process');
-          execFileSync('git', ['restore', '--', filePath], { cwd: wsFolder.uri.fsPath });
-          results.push(filePath);
-        } catch (err: any) {
-          this.logger.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
-        }
-      }
-
+      const result = await this.agent.gitRestoreChanges(filesToRestore);
       this.agentModifiedFiles.clear();
-      this.logger.info(`[Git] Restored ${results.length} files`);
-      return { restored: results.length, files: results };
+      this.logger.info(`[Git] Restored ${result.restored} files`);
+      return result;
     });
 
     this.rpc.onRequest('agent.modifiedFiles', async () => {
