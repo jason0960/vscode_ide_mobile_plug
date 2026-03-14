@@ -47,10 +47,13 @@ export class RpcClient {
    */
   handleRelayMessage(msg: any): boolean {
     if (msg.type === 'relay.joined') {
-      console.log('[Relay] Joined room:', msg.code);
+      console.log('[Relay] Joined room:', msg.code, 'hostConnected:', msg.hostConnected);
       if (msg.hostConnected) {
         // Host is ready, send auth
+        console.log('[Relay] Sending auth request to host...');
         this.sendRaw({ id: genId(), type: 'request', method: 'auth', params: { relay: true } });
+      } else {
+        console.log('[Relay] Host not connected — waiting for host_reconnected event');
       }
       return true;
     }
@@ -80,6 +83,7 @@ export class RpcClient {
 
     // Events
     if (msg.type === 'event') {
+      console.log('[RPC] Event received:', msg.method, msg.params ? JSON.stringify(msg.params).substring(0, 100) : '');
       this.onEvent(msg.method!, msg.params);
       return;
     }

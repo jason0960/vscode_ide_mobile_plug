@@ -169,6 +169,7 @@ function handleHostConnection(ws: WebSocket): void {
   ws.on('message', (data) => {
     const raw = data.toString();
     room.lastActivity = new Date().toISOString();
+    log(`[Room ${code}] HOST→CLIENTS: ${raw.substring(0, 300)}`);
 
     // Check for relay control messages
     try {
@@ -189,6 +190,7 @@ function handleHostConnection(ws: WebSocket): void {
     }
 
     // Forward to all clients
+    log(`[Room ${code}] Forwarding to ${room.clients.size} clients`);
     for (const client of room.clients) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(raw);
@@ -258,10 +260,14 @@ function handleClientConnection(ws: WebSocket, code: string): void {
   ws.on('message', (data) => {
     const raw = data.toString();
     room.lastActivity = new Date().toISOString();
+    log(`[Room ${code}] CLIENT→HOST: ${raw.substring(0, 300)}`);
 
     // Forward everything from client → host
     if (room.host && room.host.readyState === WebSocket.OPEN) {
       room.host.send(raw);
+      log(`[Room ${code}] Forwarded to host OK`);
+    } else {
+      log(`[Room ${code}] WARN: Host not available (host=${!!room.host}, readyState=${room.host?.readyState})`);
     }
   });
 
