@@ -1,6 +1,6 @@
 /**
  * Command Center Drawer — custom drawer content for the AI Command Center.
- * Designed for AI developers and VibeCcoders.
+ * Designed for AI developers and VibeCoders.
  * Future-proofed for multi-IDE support beyond VS Code.
  */
 

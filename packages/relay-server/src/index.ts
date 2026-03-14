@@ -28,6 +28,7 @@ const PORT = parseInt(process.env.PORT || '4800', 10);
 const ROOM_TTL_MS = parseInt(process.env.ROOM_TTL_MS || String(4 * 60 * 60 * 1000), 10); // 4 hours
 const MAX_ROOMS = parseInt(process.env.MAX_ROOMS || '1000', 10);
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const DEBUG_RELAY = process.env.DEBUG_RELAY === '1';
 const CODE_LENGTH = 6;
 
 // ─── State ──────────────────────────────────────────────────────
@@ -163,7 +164,7 @@ function handleHostConnection(ws: WebSocket): void {
   ws.on('message', (data) => {
     const raw = data.toString();
     room.lastActivity = new Date().toISOString();
-    log(`[Room ${code}] HOST→CLIENTS: ${raw.substring(0, 300)}`);
+    if (DEBUG_RELAY) { log(`[Room ${code}] HOST→CLIENTS (${raw.length} bytes): ${raw.substring(0, 300)}`); }
 
     // Check for relay control messages
     try {
@@ -254,7 +255,7 @@ function handleClientConnection(ws: WebSocket, code: string): void {
   ws.on('message', (data) => {
     const raw = data.toString();
     room.lastActivity = new Date().toISOString();
-    log(`[Room ${code}] CLIENT→HOST: ${raw.substring(0, 300)}`);
+    if (DEBUG_RELAY) { log(`[Room ${code}] CLIENT→HOST (${raw.length} bytes): ${raw.substring(0, 300)}`); }
 
     // Forward everything from client → host
     if (room.host && room.host.readyState === WebSocket.OPEN) {

@@ -4,6 +4,8 @@
  * Future-proofed for multi-IDE support beyond VS Code.
  */
 
+// Must be imported before any React Navigation code to ensure gesture handler is initialized
+import 'react-native-gesture-handler';
 import React, { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
