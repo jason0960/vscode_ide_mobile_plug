@@ -25,6 +25,7 @@
     "expo-clipboard": "~7.0.0",
     "expo-haptics": "~14.0.0",
     "expo-status-bar": "~2.0.0",
+    "merge-options": "^3.0.4",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-native": "0.76.9",

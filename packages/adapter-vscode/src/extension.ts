@@ -48,9 +48,20 @@ export function activate(context: vscode.ExtensionContext) {
   registerChatParticipant(context, logger.channel);
 
   // Auto-start if configured
-  const autoStart = config.get<boolean>('autoStart', false);
+  const autoStart = config.get<boolean>('autoStart', true);
   if (autoStart) {
-    server.start().catch((err) => {
+    server.start().then(async () => {
+      // Auto-connect to relay if a relay URL is configured
+      const relayUrl = config.get<string>('relayUrl', '');
+      if (relayUrl) {
+        try {
+          const code = await server!.connectRelay();
+          logger.info(`Auto-connected to relay. Room code: ${code}`);
+        } catch (err: any) {
+          logger.error(`Auto relay connection failed: ${err.message}`);
+        }
+      }
+    }).catch((err) => {
       logger.error(`Auto-start failed: ${err.message}`);
     });
   }

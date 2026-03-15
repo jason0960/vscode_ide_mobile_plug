@@ -50,6 +50,14 @@ export interface WorkspaceInfo {
 
 export type ChatMode = 'agent' | 'chat';
 
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  mode: ChatMode;
+  timestamp: number;
+  position: number;
+}
+
 // ─── Store Interface ────────────────────────────────────
 
 /**
@@ -57,7 +65,7 @@ export type ChatMode = 'agent' | 'chat';
  * Override at build time: EXPO_PUBLIC_RELAY_URL=wss://relay.example.com
  * Override at runtime: Settings screen.
  */
-const DEFAULT_RELAY_SERVER = process.env.EXPO_PUBLIC_RELAY_URL || 'ws://localhost:4800';
+const DEFAULT_RELAY_SERVER = process.env.EXPO_PUBLIC_RELAY_URL || 'wss://gopilot-relay.onrender.com';
 
 interface AppState {
   // Connection
@@ -78,6 +86,9 @@ interface AppState {
   isStreaming: boolean;
   streamingContent: string;
   agentWorking: boolean;
+
+  // Message queue — holds prompts sent while agent/chat is busy
+  messageQueue: QueuedMessage[];
 
   // Workspace
   workspace: WorkspaceInfo | null;
@@ -105,6 +116,10 @@ interface AppState {
   setSelectedModel: (model: string) => void;
   setAgentWorking: (working: boolean) => void;
 
+  enqueueMessage: (text: string, mode: ChatMode) => void;
+  removeFromQueue: (id: string) => void;
+  clearQueue: () => void;
+
   setWorkspace: (info: WorkspaceInfo | null) => void;
   setDiagnosticsSummary: (summary: { errors: number; warnings: number }) => void;
 
@@ -120,6 +135,8 @@ interface AppState {
   disconnect: () => void;
   sendChatMessage: (text: string) => Promise<void>;
   sendAgentMessage: (text: string) => Promise<void>;
+  /** Send or queue — queues if agent/chat is busy, sends immediately otherwise. */
+  sendOrQueue: (text: string) => void;
   loadWorkspaceInfo: () => Promise<void>;
   loadDiagnostics: () => Promise<DiagnosticInfo[]>;
   loadFileTree: (dirPath?: string) => Promise<FileInfo[]>;
@@ -200,11 +217,50 @@ export const useAppStore = create<AppState>((set, get) => {
 
       case 'agent.status':
         if (params.status === 'completed' || params.status === 'failed') {
-          set({ agentWorking: false });
+          set({ agentWorking: false, isStreaming: false });
+          // Agent finished — try to drain queued messages immediately
+          setTimeout(() => processQueue(), 500);
         }
         break;
     }
   };
+
+  // ── Queue processor — drains one message at a time after current completes ──
+  const processQueue = () => {
+    const state = get();
+    if (state.messageQueue.length === 0) return;
+    if (state.isStreaming || state.agentWorking) return; // still busy
+
+    const [next, ...rest] = state.messageQueue;
+    // Renumber remaining
+    set({ messageQueue: rest.map((m, i) => ({ ...m, position: i + 1 })) });
+
+    if (next.mode === 'agent') {
+      state.sendAgentMessage(next.text);
+    } else {
+      state.sendChatMessage(next.text);
+    }
+  };
+
+  // ── Polling safety net: check every 2 s if queue can drain ──
+  let queuePollTimer: ReturnType<typeof setInterval> | null = null;
+
+  const startQueuePolling = () => {
+    if (queuePollTimer) return; // already running
+    queuePollTimer = setInterval(() => {
+      processQueue();
+    }, 2_000);
+  };
+
+  const stopQueuePolling = () => {
+    if (queuePollTimer) {
+      clearInterval(queuePollTimer);
+      queuePollTimer = null;
+    }
+  };
+
+  // Start polling immediately — it's cheap (no-ops when queue is empty)
+  startQueuePolling();
 
   return {
     // Initial state
@@ -223,6 +279,8 @@ export const useAppStore = create<AppState>((set, get) => {
     isStreaming: false,
     streamingContent: '',
     agentWorking: false,
+
+    messageQueue: [],
 
     workspace: null,
     diagnosticsSummary: { errors: 0, warnings: 0 },
@@ -258,6 +316,24 @@ export const useAppStore = create<AppState>((set, get) => {
     setSelectedModel: (model) => set({ selectedModel: model }),
     setAgentWorking: (working) => set({ agentWorking: working }),
 
+    enqueueMessage: (text, mode) => {
+      const id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      set((s) => {
+        const position = s.messageQueue.length + 1;
+        return { messageQueue: [...s.messageQueue, { id, text, mode, timestamp: Date.now(), position }] };
+      });
+    },
+
+    removeFromQueue: (id) => {
+      set((s) => {
+        const filtered = s.messageQueue.filter((m) => m.id !== id);
+        // Renumber positions
+        return { messageQueue: filtered.map((m, i) => ({ ...m, position: i + 1 })) };
+      });
+    },
+
+    clearQueue: () => set({ messageQueue: [] }),
+
     setWorkspace: (info) => set({ workspace: info }),
     setDiagnosticsSummary: (summary) => set({ diagnosticsSummary: summary }),
 
@@ -292,6 +368,7 @@ export const useAppStore = create<AppState>((set, get) => {
     disconnect: () => {
       connectionManager.disconnect();
       rpcClient.cancelAll();
+      stopQueuePolling();
       set({
         sessionId: null,
         token: null,
@@ -301,6 +378,7 @@ export const useAppStore = create<AppState>((set, get) => {
         workspace: null,
         agentWorking: false,
         isStreaming: false,
+        messageQueue: [],
       });
       Promise.all([
         AsyncStorage.removeItem('mc-session'),
@@ -313,6 +391,12 @@ export const useAppStore = create<AppState>((set, get) => {
     sendChatMessage: async (text) => {
       const state = get();
       if (!text.trim() || state.connectionStatus !== 'authenticated') return;
+
+      // If already busy, queue it
+      if (state.isStreaming || state.agentWorking) {
+        state.enqueueMessage(text, 'chat');
+        return;
+      }
 
       // Add user message
       const userMsg: ChatMessage = { role: 'user', content: text, timestamp: Date.now() };
@@ -350,11 +434,20 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
         get().saveChatHistory();
       }
+
+      // Process next queued message if any
+      processQueue();
     },
 
     sendAgentMessage: async (text) => {
       const state = get();
       if (!text.trim() || state.connectionStatus !== 'authenticated') return;
+
+      // If already busy, queue it
+      if (state.isStreaming || state.agentWorking) {
+        state.enqueueMessage(text, 'agent');
+        return;
+      }
 
       const userMsg: ChatMessage = { role: 'user', content: text, timestamp: Date.now() };
       set((s) => ({
@@ -391,6 +484,20 @@ export const useAppStore = create<AppState>((set, get) => {
           agentWorking: false,
         }));
         get().saveChatHistory();
+      }
+
+      // Process next queued message if any
+      processQueue();
+    },
+
+    sendOrQueue: (text) => {
+      const state = get();
+      if (!text.trim() || state.connectionStatus !== 'authenticated') return;
+
+      if (state.chatMode === 'agent') {
+        state.sendAgentMessage(text);
+      } else {
+        state.sendChatMessage(text);
       }
     },
 

@@ -7,6 +7,8 @@
   <img src="https://img.shields.io/badge/GitHub%20Copilot-Required-green" alt="Copilot required" />
   <img src="https://img.shields.io/badge/License-MIT-yellow" alt="MIT License" />
   <img src="https://img.shields.io/badge/v0.2.0-stable-brightgreen" alt="v0.2.0" />
+  <img src="https://img.shields.io/badge/tests-581%20passing-brightgreen" alt="581 tests" />
+  <img src="https://img.shields.io/badge/coverage-76%25-green" alt="76% coverage" />
 </p>
 
 ---
@@ -271,6 +273,10 @@ app.js ←──── WebSocket ────→  server.ts     Express + WebSoc
 - **QR code pairing** — token embedded in QR, stripped from URL after pairing
 - **Timing-safe comparison** — constant-time token validation prevents timing attacks
 - **TLS encryption** — tunnels provide automatic HTTPS
+- **Path traversal protection** — all git/file operations validate paths stay within workspace root via `resolveWorkspacePath()`
+- **Relay DoS hardening** — message size limits (64KB), per-socket rate limiting (60 msg/s), per-room client caps (10), per-IP connection rate limiting
+- **IP spoofing prevention** — `x-forwarded-for` only trusted when `trustProxy: true` is explicitly set
+- **No silent failures** — room code generation throws after 100 collision retries instead of returning duplicates
 
 ---
 
@@ -447,6 +453,38 @@ npx @vscode/vsce package --no-dependencies --allow-missing-repository
 | Mobile connects but never authenticates | Extension must be running relay mode. Check that auth.success is being sent back (see console logs). |
 | Relay server won't start | Check port 4800 isn't in use: `ss -tlnp \| grep 4800` |
 | Mobile app can't reach relay from physical device | Use your machine's LAN IP instead of localhost. Update relay URL in app Settings to `ws://192.168.x.x:4800` |
+
+---
+
+## Testing
+
+### Test Suite
+
+581 automated tests across 15 suites with 76% overall coverage.
+
+```bash
+npm test                       # Run all tests
+npm run test:coverage          # Run with coverage report
+npm run test:watch             # Watch mode
+```
+
+### Coverage by Package
+
+| Package | Stmts | Lines | Key Files |
+|---------|-------|-------|-----------|
+| **protocol** | 100% | 100% | JSON-RPC handler |
+| **adapter-core** | 93.8% | 94.5% | Auth, base server, tunnel |
+| **adapter-vscode** | 66.6% | 67.0% | server.ts (75%), agent.ts (93%), copilot.ts (79%) |
+| **relay-server** | 83.1% | 84.8% | Relay hub with DoS protections |
+| **mobile-app (API)** | 97.3% | 98.3% | WebSocket connection + RPC client |
+
+### CI/CD
+
+GitHub Actions runs on every push (all branches) and PRs to `main`/`relay-main`:
+- TypeScript type checking
+- Full test suite on Node.js 18 + 20
+- Coverage report upload
+- Extension build + VSIX packaging
 
 ---
 

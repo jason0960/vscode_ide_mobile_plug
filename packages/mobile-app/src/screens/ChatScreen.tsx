@@ -91,10 +91,12 @@ export default function ChatScreen() {
     agentWorking,
     connectionStatus,
     theme,
+    messageQueue,
     setChatMode,
     sendChatMessage,
     sendAgentMessage,
     clearMessages,
+    removeFromQueue,
   } = useAppStore();
 
   const colors = Colors[theme];
@@ -168,14 +170,18 @@ export default function ChatScreen() {
     }
   }, [inputText, chatMode, sendAgentMessage, sendChatMessage]);
 
-  // Data for FlatList: messages + optional streaming bubble
+  // Data for FlatList: messages + optional streaming bubble + queued messages
   const data = React.useMemo(() => {
-    const items: (ChatMessage | { id: 'streaming' })[] = [...messages];
+    const items: (ChatMessage | { id: string })[] = [...messages];
     if (isStreaming) {
       items.push({ id: 'streaming' } as any);
     }
+    // Show queued messages so user sees them waiting
+    for (const q of messageQueue) {
+      items.push({ id: `queued-${q.id}`, role: 'user', content: q.text, timestamp: q.timestamp, _queued: true, _position: q.position } as any);
+    }
     return items;
-  }, [messages, isStreaming]);
+  }, [messages, isStreaming, messageQueue]);
 
   // Auto-scroll
   useEffect(() => {
@@ -187,17 +193,36 @@ export default function ChatScreen() {
   }, [data.length, streamingContent]);
 
   const isAuthenticated = connectionStatus === 'authenticated';
-  const canSend = isAuthenticated && !isStreaming && inputText.trim().length > 0;
+  const canSend = isAuthenticated && inputText.trim().length > 0;
 
   const renderItem = useCallback(({ item }: { item: any }) => {
     if (item.id === 'streaming') {
       return <StreamingBubble content={streamingContent} colors={colors} mdStyles={mdStyles} />;
     }
+    if (item._queued) {
+      return (
+        <View style={[styles.bubble, { backgroundColor: colors.userBubble, opacity: 0.6 }, styles.userBubble]}>
+          <View style={styles.bubbleHeader}>
+            <View style={styles.queueBadgeRow}>
+              <Text style={[styles.roleName, { color: colors.primaryLight }]}>You</Text>
+              <View style={[styles.queueBadge, { backgroundColor: colors.primary + '33' }]}>
+                <Text style={[styles.queueBadgeText, { color: colors.primary }]}>Queue #{item._position}</Text>
+              </View>
+            </View>
+            <TouchableOpacity onPress={() => removeFromQueue(item.id.replace('queued-', ''))}>
+              <Ionicons name="close-circle-outline" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+          <Text style={[styles.userText, { color: colors.text }]}>{item.content}</Text>
+        </View>
+      );
+    }
     return <MessageBubble msg={item} colors={colors} mdStyles={mdStyles} />;
-  }, [streamingContent, colors, mdStyles]);
+  }, [streamingContent, colors, mdStyles, removeFromQueue]);
 
   const keyExtractor = useCallback((item: any, index: number) => {
     if (item.id === 'streaming') return 'streaming';
+    if (item._queued) return item.id;
     return `${item.timestamp}-${index}`;
   }, []);
 
@@ -286,7 +311,9 @@ export default function ChatScreen() {
       {agentWorking && (
         <View style={[styles.agentBanner, { backgroundColor: colors.primary + '22' }]}>
           <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={[styles.agentBannerText, { color: colors.primary }]}>Agent working...</Text>
+          <Text style={[styles.agentBannerText, { color: colors.primary }]}>
+            Agent working...{messageQueue.length > 0 ? ` (${messageQueue.length} queued)` : ''}
+          </Text>
         </View>
       )}
 
@@ -294,7 +321,13 @@ export default function ChatScreen() {
       <View style={[styles.inputBar, { backgroundColor: colors.surface, borderTopColor: colors.border }]}>
         <TextInput
           style={[styles.input, { backgroundColor: colors.background, color: colors.text, borderColor: colors.border }]}
-          placeholder={chatMode === 'agent' ? 'Ask Copilot agent...' : 'Ask a quick question...'}
+          placeholder={
+            isStreaming || agentWorking
+              ? 'Type to queue next message...'
+              : chatMode === 'agent'
+                ? 'Ask Copilot agent...'
+                : 'Ask a quick question...'
+          }
           placeholderTextColor={colors.textMuted}
           value={inputText}
           onChangeText={setInputText}
@@ -387,6 +420,13 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
   },
   agentBannerText: { fontSize: FontSize.sm, fontWeight: '600' },
+  queueBadgeRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs },
+  queueBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: BorderRadius.sm,
+  },
+  queueBadgeText: { fontSize: FontSize.xs, fontWeight: '600' },
   inputBar: {
     flexDirection: 'row',
     padding: Spacing.sm,

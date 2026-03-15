@@ -372,7 +372,7 @@ export class VsCodeServer extends BaseServer {
       this.logger.info(`[Agent] Using workspace folder: ${wsFolder.uri.fsPath}`);
 
       try {
-        const captureMode = this.config.get<string>('captureMode', 'relay');
+        const captureMode = this.config.get<string>('captureMode', 'hybrid');
         this.logger.info(`[Agent] Capture mode: ${captureMode}`);
 
         const interceptorSession = this.interceptor.startSession((chunk) => {
@@ -389,13 +389,22 @@ export class VsCodeServer extends BaseServer {
 
         this.markAgentResponseComplete(ws);
 
-        const fileDiffs = await this.computeFileDiffs();
+        // Send early "completed" so mobile can unblock queue immediately
         this.sendToAllSessions('agent.status', {
           status: 'completed',
-          modifiedFiles: Array.from(this.agentModifiedFiles),
-          diffs: fileDiffs,
           timestamp: Date.now(),
         });
+
+        // Then compute diffs (may be slow) and send enriched update
+        const fileDiffs = await this.computeFileDiffs();
+        if (fileDiffs.length > 0 || this.agentModifiedFiles.size > 0) {
+          this.sendToAllSessions('agent.status', {
+            status: 'completed',
+            modifiedFiles: Array.from(this.agentModifiedFiles),
+            diffs: fileDiffs,
+            timestamp: Date.now(),
+          });
+        }
       } catch (err: any) {
         const fileDiffs = await this.computeFileDiffs();
         this.sendToAllSessions('agent.status', {
@@ -590,7 +599,7 @@ export class VsCodeServer extends BaseServer {
     this.logger.info(`[Relay] Relay file fsPath: ${relayUri.fsPath}`);
     const DONE_MARKER = '<!-- MOBILE_DONE -->';
     const TIMEOUT_MS = 600_000; // 10 minutes — agent tasks with tool calls can be very long
-    const POLL_INTERVAL_MS = 5_000;
+    const POLL_INTERVAL_MS = 2_000;
 
     try {
       await vscode.workspace.fs.delete(relayUri);
@@ -692,13 +701,53 @@ export class VsCodeServer extends BaseServer {
       watcher.onDidChange(throttledCheck);
       watcher.onDidCreate(throttledCheck);
 
+      // ── Also listen for in-editor document changes (tool-based writes) ──
+      const docChangeListener = vscode.workspace.onDidChangeTextDocument((e) => {
+        if (resolved) return;
+        const docPath = e.document.uri.fsPath;
+        if (docPath === relayUri.fsPath && e.contentChanges.length > 0) {
+          throttledCheck();
+        }
+      });
+
+      // ── Also listen for document open (create_file opens the doc) ──
+      const docOpenListener = vscode.workspace.onDidOpenTextDocument((doc) => {
+        if (resolved) return;
+        if (doc.uri.fsPath === relayUri.fsPath) {
+          setTimeout(checkFile, 500); // slight delay for content to be written
+        }
+      });
+
       // ── Poll every POLL_INTERVAL_MS as the primary streaming mechanism ──
       const pollTimer = setInterval(checkFile, POLL_INTERVAL_MS);
+
+      // Clean up all listeners on resolution
+      const originalResolve = resolve;
+      resolve = (val: string) => {
+        docChangeListener.dispose();
+        docOpenListener.dispose();
+        originalResolve(val);
+      };
+      const originalReject = reject;
+      reject = (err: Error) => {
+        docChangeListener.dispose();
+        docOpenListener.dispose();
+        originalReject(err);
+      };
     });
 
     send('⏳ *Waiting for Copilot agent response on desktop...*\n\n');
 
-    const mobilePrompt = `[📱 Mobile] ${prompt}`;
+    const relayInstruction = [
+      '',
+      '---',
+      'IMPORTANT: Write your EXACT verbatim response into the workspace file `.copilot-mobile-relay.md`.',
+      'Write to the relay file as you go — after each logical step, update the file with everything so far.',
+      'When completely finished, add `<!-- MOBILE_DONE -->` on its own final line.',
+      'Overwrite the file each time (not append).',
+    ].join('\n');
+
+    const mobilePrompt = `[📱 Mobile] ${prompt}\n${relayInstruction}`;
     this.logger.info(`[Relay] ━━━ Executing workbench.action.chat.open ━━━`);
     this.logger.info(`[Relay] Prompt (first 200 chars): ${prompt.substring(0, 200)}`);
     
