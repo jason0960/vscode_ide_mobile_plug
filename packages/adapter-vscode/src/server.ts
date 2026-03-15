@@ -246,20 +246,33 @@ export class VsCodeServer extends BaseServer {
               this.logger.info(`[Relay] Auth accepted via relay room membership`);
             }
 
-            const session = this.auth.createSession();
+            // Reuse existing session if the mobile client provided a sessionId (reconnection),
+            // otherwise create a new session (first connect).
+            const existingSessionId = msg.params?.sessionId;
+            let sessionId: string;
+            if (existingSessionId && this.sessions.has(existingSessionId)) {
+              sessionId = existingSessionId;
+              this.logger.info(`[Relay] Reusing existing session: ${sessionId}`);
+            } else {
+              const session = this.auth.createSession();
+              sessionId = session.id;
+              this.logger.info(`[Relay] Created new session: ${sessionId}`);
+            }
+
             const authResponse = JSON.stringify({
               id: msg.id || crypto.randomUUID(),
               type: 'event',
               method: 'auth.success',
-              params: { sessionId: session.id },
+              params: { sessionId },
             });
             this.relay.send(authResponse);
             this.logger.info(`[Relay] auth.success sent: ${authResponse}`);
 
             // Set up the virtual WS and session for future messages
             const virtualWs = this.createRelayVirtualWs();
-            this.clients.set(virtualWs, { authenticated: true, sessionId: session.id });
-            this.registerSession(session.id, virtualWs);
+            this.clients.set(virtualWs, { authenticated: true, sessionId });
+            this.registerSession(sessionId, virtualWs);
+            this.flushSessionQueue(sessionId);
             return;
           }
         } catch {

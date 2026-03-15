@@ -15,6 +15,12 @@ README.md.bak
 package-lock.json
 **/.github/**
 
+# ECC agent configs (monorepo root — must not be packed)
+../../.agents-*/**
+../../.agents-hooks.json
+../../.expo/**
+../../**
+
 # Trim bloat from node_modules
 **/node_modules/**/test/**
 **/node_modules/**/tests/**

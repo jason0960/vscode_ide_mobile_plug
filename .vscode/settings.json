@@ -1,4 +1,3 @@
 {
-    "mobileCopilot.tunnelProvider": "vscode",
-    "mobileCopilot.relayUrl": "ws://localhost:4800"
+    "mobileCopilot.tunnelProvider": "vscode"
 }

@@ -2,11 +2,15 @@ import * as vscode from 'vscode';
 import WebSocket = require('ws');
 import type { ILogger } from '@mobile-copilot/adapter-core';
 import type { VsCodeConfig } from './config';
+import { E2ECrypto } from './e2e-crypto';
 
 /**
  * Relay client — connects the VS Code extension to a cloud relay server
  * as the "host" side. All messages from the local RPC handler are forwarded
  * to remote mobile clients through the relay, and vice versa.
+ *
+ * E2E encryption: X25519 key exchange + XSalsa20-Poly1305 AEAD via tweetnacl.
+ * The relay server sees only opaque ciphertext.
  */
 export class RelayClient {
   private ws: WebSocket | null = null;
@@ -15,6 +19,7 @@ export class RelayClient {
   private reconnecting = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private readonly e2e = new E2ECrypto();
 
   /** Fires when relay is connected and room is created */
   readonly onRoomCreated: vscode.EventEmitter<{ code: string }> = new vscode.EventEmitter();
@@ -107,6 +112,7 @@ export class RelayClient {
 
           if (msg.type === 'relay.client_joined') {
             this.logger.info(`[Relay] Client joined (${msg.clientCount} total)`);
+            this.e2e.reset();   // new client → fresh key exchange
             this.onClientJoined.fire({ clientCount: msg.clientCount });
             return;
           }
@@ -120,9 +126,8 @@ export class RelayClient {
           // Not valid JSON relay control — fall through
         }
 
-        // Everything else is a message from a mobile client — forward to local handler
-        this.logger.info(`[Relay] Forwarding message to local handler (${raw.length} bytes)`);
-        this.onMessage.fire(raw);
+        // Route through E2E handler (key exchange, decrypt, or passthrough)
+        this.handleIncomingMessage(raw);
       });
 
       this.ws.on('close', (code, reason) => {
@@ -149,12 +154,18 @@ export class RelayClient {
 
   /**
    * Send a message to all connected mobile clients via the relay.
+   * If E2E is established, the message is encrypted automatically.
    */
   send(data: string): void {
-    console.log(`[MCR-DEBUG relay-client] send called, ws=${!!this.ws}, readyState=${this.ws?.readyState}, data=${data.substring(0, 200)}`);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.logger.info(`[Relay] Sending to relay: ${data.substring(0, 200)}`);
-      this.ws.send(data);
+      if (this.e2e.isReady) {
+        const encrypted = this.e2e.encrypt(data);
+        this.logger.info(`[Relay] Sending encrypted (${encrypted.length} bytes, plaintext was ${data.length} bytes)`);
+        this.ws.send(encrypted);
+      } else {
+        this.logger.info(`[Relay] Sending plaintext: ${data.substring(0, 200)}`);
+        this.ws.send(data);
+      }
     } else {
       this.logger.info(`[Relay] Cannot send — ws=${this.ws ? 'exists' : 'null'}, readyState=${this.ws?.readyState}`);
     }
@@ -171,6 +182,7 @@ export class RelayClient {
 
     this.roomCode = null;
     this.hostSecret = null;
+    this.e2e.reset();
 
     if (this.ws) {
       this.ws.close(1000, 'Host disconnecting');
@@ -188,6 +200,62 @@ export class RelayClient {
     this.onMessage.dispose();
     this.onClientJoined.dispose();
     this.onClientLeft.dispose();
+  }
+
+  // ─── E2E Encryption ──────────────────────────────────────
+
+  /**
+   * Handle an incoming message: key exchange, decrypt, or passthrough.
+   * Called from BOTH the connect() and reconnect() message handlers.
+   */
+  private handleIncomingMessage(raw: string): void {
+    try {
+      const msg = JSON.parse(raw);
+
+      // E2E key exchange initiated by mobile client
+      if (msg.type === 'e2e.keyExchange' && msg.pubkey) {
+        this.handleKeyExchange(msg.pubkey);
+        return;
+      }
+
+      // E2E encrypted message — decrypt and forward plaintext
+      if (msg.type === 'e2e.encrypted' && msg.n && msg.c) {
+        try {
+          const decrypted = this.e2e.decrypt(msg);
+          this.logger.info(`[Relay] Decrypted E2E message (${decrypted.length} bytes)`);
+          this.onMessage.fire(decrypted);
+        } catch (err: any) {
+          this.logger.error(`[Relay] E2E decryption failed: ${err.message}`);
+        }
+        return;
+      }
+    } catch {
+      // Not valid JSON — fall through to plaintext passthrough
+    }
+
+    // Unencrypted message (pre-key-exchange or plain control message)
+    this.logger.info(`[Relay] Forwarding plaintext message (${raw.length} bytes)`);
+    this.onMessage.fire(raw);
+  }
+
+  /**
+   * Complete the E2E key exchange: generate our key pair, send public key
+   * back to the mobile client (plaintext), then derive the shared key.
+   *
+   * Order matters: send response BEFORE deriving shared key so the response
+   * goes out unencrypted (the mobile hasn't derived the key yet either).
+   */
+  private handleKeyExchange(clientPubkeyBase64: string): void {
+    this.logger.info('[Relay] E2E key exchange — received client public key');
+    const hostPubkey = this.e2e.generateKeyPair();
+
+    // Send our public key PLAINTEXT (before deriving shared key)
+    const response = JSON.stringify({ type: 'e2e.keyExchange', pubkey: hostPubkey });
+    this.ws!.send(response);
+
+    // NOW derive the shared key — all future send() calls will encrypt
+    this.e2e.deriveSharedKey(clientPubkeyBase64);
+    this.logger.info('[Relay] E2E key exchange complete — all further messages encrypted');
   }
 
   // ─── Reconnection ──────────────────────────────────────────
@@ -225,12 +293,14 @@ export class RelayClient {
 
             if (msg.type === 'relay.rejoined') {
               this.reconnecting = false;
+              this.e2e.reset();   // fresh key exchange after rejoin
               this.logger.info(`[Relay] Rejoined room: ${msg.code}`);
               this.onRoomCreated.fire({ code: msg.code });
               return;
             }
 
             if (msg.type === 'relay.client_joined') {
+              this.e2e.reset();   // new client → fresh key exchange
               this.onClientJoined.fire({ clientCount: msg.clientCount });
               return;
             }
@@ -243,8 +313,8 @@ export class RelayClient {
             // fall through
           }
 
-          console.log(`[MCR-DEBUG relay-client reconnect] Firing onMessage: ${raw.substring(0, 200)}`);
-          this.onMessage.fire(raw);
+          // Route through E2E handler (key exchange, decrypt, or passthrough)
+          this.handleIncomingMessage(raw);
         });
 
         this.ws.on('close', (code, reason) => {
