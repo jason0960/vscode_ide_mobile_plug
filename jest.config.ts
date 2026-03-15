@@ -48,6 +48,11 @@ const config: Config = {
   // Mock vscode API for adapter-vscode tests
   // mobile-app API layer (connection.ts, rpc.ts) is testable under node; screens/components are excluded
   modulePathIgnorePatterns: [],
+  // Silence noisy console.log/warn/error from source code during tests
+  silent: true,
+  // Avoid "worker process has failed to exit gracefully" warnings
+  // by running relay-server tests in the main thread (they use real HTTP servers)
+  workerIdleMemoryLimit: '512MB',
 };
 
 export default config;
