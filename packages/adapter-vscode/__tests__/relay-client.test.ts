@@ -267,7 +267,7 @@ describe('RelayClient', () => {
       const rpcMsg = JSON.stringify({ jsonrpc: '2.0', method: 'chat.send', params: { text: 'hi' } });
       ws._emit('message', Buffer.from(rpcMsg));
 
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Forwarding message'));
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Forwarding plaintext message'));
     });
 
     it('forwards non-JSON messages to onMessage', async () => {
@@ -283,7 +283,7 @@ describe('RelayClient', () => {
       await promise;
 
       ws._emit('message', Buffer.from('not json'));
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Forwarding message'));
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Forwarding plaintext message'));
     });
   });
 
