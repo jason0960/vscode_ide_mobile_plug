@@ -27,20 +27,20 @@
         "backgroundColor": "#1e1e1e"
       },
       "package": "com.mobilecopilot.app",
-      "permissions": ["CAMERA"]
+      "permissions": [
+        "CAMERA"
+      ]
     },
     "scheme": "mobile-copilot",
-    "owner": "jason0960",
+    "owner": "jason096",
     "extra": {
       "eas": {
-        "projectId": ""
+        "projectId": "503c4859-a972-406a-b619-17ee59f03c71"
       }
     },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
+    "runtimeVersion": "0.2.0",
     "updates": {
-      "url": ""
+      "url": "https://u.expo.dev/503c4859-a972-406a-b619-17ee59f03c71"
     }
   }
 }

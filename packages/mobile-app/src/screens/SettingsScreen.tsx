@@ -12,8 +12,9 @@ import {
   StyleSheet,
   Switch,
   Alert,
+  Platform,
+  Modal,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useAppStore } from '../store/AppStore';
 import { Colors, Spacing, FontSize, BorderRadius, ThemeMode } from '../theme';
 
@@ -36,12 +37,54 @@ export default function SettingsScreen() {
     setChatMode,
     setRelayServerUrl,
     disconnect,
+    switchRoom,
   } = useAppStore();
 
   const colors = Colors[theme];
   const isAuthenticated = connectionStatus === 'authenticated';
   const [editingRelayUrl, setEditingRelayUrl] = useState(false);
   const [relayUrlDraft, setRelayUrlDraft] = useState(relayServerUrl);
+  const [roomModalVisible, setRoomModalVisible] = useState(false);
+  const [roomDraft, setRoomDraft] = useState('');
+
+  const handleChangeRoom = () => {
+    setRoomDraft('');
+    if (Platform.OS === 'ios') {
+      Alert.prompt(
+        'Switch Room',
+        'Enter a new 6-character room code:',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Switch',
+            onPress: (code?: string) => {
+              const trimmed = (code ?? '').trim().toUpperCase();
+              if (trimmed.length >= 4 && trimmed.length <= 8) {
+                switchRoom(trimmed);
+              } else {
+                Alert.alert('Invalid Code', 'Room code must be 4-8 characters.');
+              }
+            },
+          },
+        ],
+        'plain-text',
+        '',
+        'default',
+      );
+    } else {
+      setRoomModalVisible(true);
+    }
+  };
+
+  const submitRoomSwitch = () => {
+    const trimmed = roomDraft.trim().toUpperCase();
+    setRoomModalVisible(false);
+    if (trimmed.length >= 4 && trimmed.length <= 8) {
+      switchRoom(trimmed);
+    } else {
+      Alert.alert('Invalid Code', 'Room code must be 4-8 characters.');
+    }
+  };
 
   const handleDisconnect = () => {
     Alert.alert('Disconnect', 'Are you sure you want to disconnect?', [
@@ -54,23 +97,14 @@ export default function SettingsScreen() {
     <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>{title}</Text>
   );
 
-  const Row = ({ label, value, valueIcon, valueIconColor, onPress }: {
-    label: string;
-    value?: string;
-    valueIcon?: keyof typeof Ionicons.glyphMap;
-    valueIconColor?: string;
-    onPress?: () => void;
-  }) => (
+  const Row = ({ label, value, onPress }: { label: string; value?: string; onPress?: () => void }) => (
     <TouchableOpacity
       style={[styles.row, { borderBottomColor: colors.border }]}
       onPress={onPress}
       disabled={!onPress}
     >
       <Text style={[styles.rowLabel, { color: colors.text }]}>{label}</Text>
-      <View style={styles.rowValueRow}>
-        {valueIcon && <Ionicons name={valueIcon} size={14} color={valueIconColor || colors.textSecondary} />}
-        {value && <Text style={[styles.rowValue, { color: colors.textSecondary }]}>{value}</Text>}
-      </View>
+      {value && <Text style={[styles.rowValue, { color: colors.textSecondary }]}>{value}</Text>}
     </TouchableOpacity>
   );
 
@@ -79,32 +113,15 @@ export default function SettingsScreen() {
       {/* Connection */}
       <SectionHeader title="CONNECTION" />
       <View style={[styles.section, { backgroundColor: colors.surface }]}>
-        <Row
-          label="Status"
-          value={
-            connectionStatus === 'authenticated' ? 'Connected'
-            : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'Connecting'
-            : 'Disconnected'
-          }
-          valueIcon={
-            connectionStatus === 'authenticated' ? 'ellipse'
-            : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'ellipse'
-            : 'ellipse'
-          }
-          valueIconColor={
-            connectionStatus === 'authenticated' ? colors.online
-            : connectionStatus === 'connecting' || connectionStatus === 'connected' ? colors.connecting
-            : colors.offline
-          }
-        />
-        <Row
-          label="Mode"
-          value={connection.currentConfig?.mode === 'relay' ? 'Relay' : 'Direct'}
-          valueIcon={connection.currentConfig?.mode === 'relay' ? 'globe-outline' : 'radio-outline'}
-        />
+        <Row label="Status" value={
+          connectionStatus === 'authenticated' ? '🟢 Connected'
+          : connectionStatus === 'connecting' || connectionStatus === 'connected' ? '🟡 Connecting'
+          : '🔴 Disconnected'
+        } />
+        <Row label="Mode" value={connection.currentConfig?.mode === 'relay' ? '🌐 Relay' : '📡 Direct'} />
         {workspace && <Row label="Workspace" value={workspace.name} />}
         {workspace?.gitBranch && <Row label="Branch" value={workspace.gitBranch} />}
-        {relayCode && <Row label="Room Code" value={relayCode} />}
+        {relayCode && <Row label="Room Code" value={`${relayCode}  ✏️`} onPress={handleChangeRoom} />}
         {relayUrl && <Row label="Relay URL" value={relayUrl} />}
       </View>
 
@@ -235,6 +252,47 @@ export default function SettingsScreen() {
       <Text style={[styles.version, { color: colors.textMuted }]}>
         Mobile Copilot v0.2.0
       </Text>
+
+      {/* Room Switch Modal (Android / Web) */}
+      <Modal
+        visible={roomModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRoomModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalBox, { backgroundColor: colors.surface }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Switch Room</Text>
+            <Text style={[styles.modalSubtitle, { color: colors.textMuted }]}>Enter a new room code:</Text>
+            <TextInput
+              style={[styles.modalInput, { backgroundColor: colors.background, color: colors.text, borderColor: colors.border }]}
+              value={roomDraft}
+              onChangeText={setRoomDraft}
+              placeholder="e.g. ABC123"
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              maxLength={8}
+              autoFocus
+              onSubmitEditing={submitRoomSwitch}
+            />
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.border }]}
+                onPress={() => setRoomModalVisible(false)}
+              >
+                <Text style={[styles.modalBtnText, { color: colors.text }]}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.primary }]}
+                onPress={submitRoomSwitch}
+              >
+                <Text style={styles.modalBtnText}>Switch</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -265,7 +323,6 @@ const styles = StyleSheet.create({
   },
   rowLabel: { fontSize: FontSize.md },
   rowValue: { fontSize: FontSize.sm, maxWidth: '60%', textAlign: 'right' },
-  rowValueRow: { flexDirection: 'row', alignItems: 'center', gap: 6, maxWidth: '60%' },
   modeToggle: {
     flexDirection: 'row',
     borderRadius: BorderRadius.md,
@@ -323,5 +380,51 @@ const styles = StyleSheet.create({
     fontSize: FontSize.xs,
     textAlign: 'center',
     paddingVertical: Spacing.xl,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  modalBox: {
+    width: 300,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.lg,
+  },
+  modalTitle: {
+    fontSize: FontSize.lg,
+    fontWeight: '700',
+    marginBottom: Spacing.xs,
+  },
+  modalSubtitle: {
+    fontSize: FontSize.sm,
+    marginBottom: Spacing.md,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    fontSize: FontSize.lg,
+    fontWeight: '600',
+    letterSpacing: 3,
+    textAlign: 'center',
+    marginBottom: Spacing.md,
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  modalBtn: {
+    flex: 1,
+    paddingVertical: Spacing.sm,
+    borderRadius: BorderRadius.md,
+    alignItems: 'center',
+  },
+  modalBtnText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: FontSize.sm,
   },
 });

@@ -50,14 +50,6 @@ export interface WorkspaceInfo {
 
 export type ChatMode = 'agent' | 'chat';
 
-export interface QueuedMessage {
-  id: string;
-  text: string;
-  mode: ChatMode;
-  timestamp: number;
-  position: number;
-}
-
 // ─── Store Interface ────────────────────────────────────
 
 /**
@@ -86,9 +78,7 @@ interface AppState {
   isStreaming: boolean;
   streamingContent: string;
   agentWorking: boolean;
-
-  // Message queue — holds prompts sent while agent/chat is busy
-  messageQueue: QueuedMessage[];
+  messageQueue: Array<{ id: string; text: string; timestamp: number; position: number }>;
 
   // Workspace
   workspace: WorkspaceInfo | null;
@@ -96,6 +86,9 @@ interface AppState {
 
   // Settings
   theme: ThemeMode;
+
+  // Room switching
+  isSwitchingRoom: boolean;
 
   // Singleton API instances
   connection: ConnectionManager;
@@ -115,10 +108,7 @@ interface AppState {
   setChatMode: (mode: ChatMode) => void;
   setSelectedModel: (model: string) => void;
   setAgentWorking: (working: boolean) => void;
-
-  enqueueMessage: (text: string, mode: ChatMode) => void;
   removeFromQueue: (id: string) => void;
-  clearQueue: () => void;
 
   setWorkspace: (info: WorkspaceInfo | null) => void;
   setDiagnosticsSummary: (summary: { errors: number; warnings: number }) => void;
@@ -133,10 +123,9 @@ interface AppState {
   /** Connect via relay with explicit URL + code (used by auto-reconnect). */
   connectRelay: (relayUrl: string, code: string) => void;
   disconnect: () => void;
+  switchRoom: (newCode: string) => void;
   sendChatMessage: (text: string) => Promise<void>;
   sendAgentMessage: (text: string) => Promise<void>;
-  /** Send or queue — queues if agent/chat is busy, sends immediately otherwise. */
-  sendOrQueue: (text: string) => void;
   loadWorkspaceInfo: () => Promise<void>;
   loadDiagnostics: () => Promise<DiagnosticInfo[]>;
   loadFileTree: (dirPath?: string) => Promise<FileInfo[]>;
@@ -188,7 +177,7 @@ export const useAppStore = create<AppState>((set, get) => {
         break;
 
       case 'auth.success':
-        set({ sessionId: params.sessionId, connectionError: null });
+        set({ sessionId: params.sessionId, connectionError: null, isSwitchingRoom: false });
         connectionManager.markAuthenticated();
         state.saveCredentials();
         state.loadWorkspaceInfo();
@@ -217,50 +206,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
       case 'agent.status':
         if (params.status === 'completed' || params.status === 'failed') {
-          set({ agentWorking: false, isStreaming: false });
-          // Agent finished — try to drain queued messages immediately
-          setTimeout(() => processQueue(), 500);
+          set({ agentWorking: false });
         }
         break;
     }
   };
-
-  // ── Queue processor — drains one message at a time after current completes ──
-  const processQueue = () => {
-    const state = get();
-    if (state.messageQueue.length === 0) return;
-    if (state.isStreaming || state.agentWorking) return; // still busy
-
-    const [next, ...rest] = state.messageQueue;
-    // Renumber remaining
-    set({ messageQueue: rest.map((m, i) => ({ ...m, position: i + 1 })) });
-
-    if (next.mode === 'agent') {
-      state.sendAgentMessage(next.text);
-    } else {
-      state.sendChatMessage(next.text);
-    }
-  };
-
-  // ── Polling safety net: check every 2 s if queue can drain ──
-  let queuePollTimer: ReturnType<typeof setInterval> | null = null;
-
-  const startQueuePolling = () => {
-    if (queuePollTimer) return; // already running
-    queuePollTimer = setInterval(() => {
-      processQueue();
-    }, 2_000);
-  };
-
-  const stopQueuePolling = () => {
-    if (queuePollTimer) {
-      clearInterval(queuePollTimer);
-      queuePollTimer = null;
-    }
-  };
-
-  // Start polling immediately — it's cheap (no-ops when queue is empty)
-  startQueuePolling();
 
   return {
     // Initial state
@@ -279,13 +229,13 @@ export const useAppStore = create<AppState>((set, get) => {
     isStreaming: false,
     streamingContent: '',
     agentWorking: false,
-
     messageQueue: [],
 
     workspace: null,
     diagnosticsSummary: { errors: 0, warnings: 0 },
 
     theme: 'dark',
+    isSwitchingRoom: false,
 
     connection: connectionManager,
     rpc: rpcClient,
@@ -315,24 +265,7 @@ export const useAppStore = create<AppState>((set, get) => {
     setChatMode: (mode) => set({ chatMode: mode }),
     setSelectedModel: (model) => set({ selectedModel: model }),
     setAgentWorking: (working) => set({ agentWorking: working }),
-
-    enqueueMessage: (text, mode) => {
-      const id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      set((s) => {
-        const position = s.messageQueue.length + 1;
-        return { messageQueue: [...s.messageQueue, { id, text, mode, timestamp: Date.now(), position }] };
-      });
-    },
-
-    removeFromQueue: (id) => {
-      set((s) => {
-        const filtered = s.messageQueue.filter((m) => m.id !== id);
-        // Renumber positions
-        return { messageQueue: filtered.map((m, i) => ({ ...m, position: i + 1 })) };
-      });
-    },
-
-    clearQueue: () => set({ messageQueue: [] }),
+    removeFromQueue: (id) => set((s) => ({ messageQueue: s.messageQueue.filter((q) => q.id !== id) })),
 
     setWorkspace: (info) => set({ workspace: info }),
     setDiagnosticsSummary: (summary) => set({ diagnosticsSummary: summary }),
@@ -368,7 +301,6 @@ export const useAppStore = create<AppState>((set, get) => {
     disconnect: () => {
       connectionManager.disconnect();
       rpcClient.cancelAll();
-      stopQueuePolling();
       set({
         sessionId: null,
         token: null,
@@ -378,7 +310,6 @@ export const useAppStore = create<AppState>((set, get) => {
         workspace: null,
         agentWorking: false,
         isStreaming: false,
-        messageQueue: [],
       });
       Promise.all([
         AsyncStorage.removeItem('mc-session'),
@@ -388,15 +319,37 @@ export const useAppStore = create<AppState>((set, get) => {
       ]).catch(() => {});
     },
 
+    switchRoom: (newCode) => {
+      // Disconnect WebSocket only — keep messages, workspace, theme, etc.
+      set({ isSwitchingRoom: true, connectionError: null });
+      connectionManager.disconnect();
+      rpcClient.cancelAll();
+
+      // Clear session-specific state but preserve chat history & workspace
+      set({
+        sessionId: null,
+        token: null,
+        relayCode: newCode,
+        agentWorking: false,
+        isStreaming: false,
+      });
+
+      // Reconnect with new code using the same relay server
+      const relayUrl = get().relayServerUrl;
+      set({ relayUrl });
+      connectionManager.connectRelay(relayUrl, newCode);
+
+      // Persist new code
+      AsyncStorage.setItem('mc-relay-code', newCode).catch(() => {});
+      AsyncStorage.setItem('mc-relay-url', relayUrl).catch(() => {});
+
+      // Clear the switching flag after a short delay
+      setTimeout(() => set({ isSwitchingRoom: false }), 3000);
+    },
+
     sendChatMessage: async (text) => {
       const state = get();
       if (!text.trim() || state.connectionStatus !== 'authenticated') return;
-
-      // If already busy, queue it
-      if (state.isStreaming || state.agentWorking) {
-        state.enqueueMessage(text, 'chat');
-        return;
-      }
 
       // Add user message
       const userMsg: ChatMessage = { role: 'user', content: text, timestamp: Date.now() };
@@ -434,20 +387,11 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
         get().saveChatHistory();
       }
-
-      // Process next queued message if any
-      processQueue();
     },
 
     sendAgentMessage: async (text) => {
       const state = get();
       if (!text.trim() || state.connectionStatus !== 'authenticated') return;
-
-      // If already busy, queue it
-      if (state.isStreaming || state.agentWorking) {
-        state.enqueueMessage(text, 'agent');
-        return;
-      }
 
       const userMsg: ChatMessage = { role: 'user', content: text, timestamp: Date.now() };
       set((s) => ({
@@ -484,20 +428,6 @@ export const useAppStore = create<AppState>((set, get) => {
           agentWorking: false,
         }));
         get().saveChatHistory();
-      }
-
-      // Process next queued message if any
-      processQueue();
-    },
-
-    sendOrQueue: (text) => {
-      const state = get();
-      if (!text.trim() || state.connectionStatus !== 'authenticated') return;
-
-      if (state.chatMode === 'agent') {
-        state.sendAgentMessage(text);
-      } else {
-        state.sendChatMessage(text);
       }
     },
 

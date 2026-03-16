@@ -4,13 +4,17 @@
  * Future-proofed for multi-IDE support beyond VS Code.
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
   ScrollView,
+  Alert,
+  Platform,
+  TextInput,
+  Modal,
 } from 'react-native';
 import {
   DrawerContentScrollView,
@@ -41,6 +45,50 @@ export default function CommandCenterDrawer(props: DrawerContentComponentProps) 
     theme,
     relayCode,
   } = useAppStore();
+  const switchRoom = useAppStore((s) => s.switchRoom);
+
+  const [roomModalVisible, setRoomModalVisible] = useState(false);
+  const [roomDraft, setRoomDraft] = useState('');
+
+  const handleChangeRoom = () => {
+    setRoomDraft('');
+    if (Platform.OS === 'ios') {
+      Alert.prompt(
+        'Switch Room',
+        'Enter a new 6-character room code:',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Switch',
+            onPress: (code?: string) => {
+              const trimmed = (code ?? '').trim().toUpperCase();
+              if (trimmed.length >= 4 && trimmed.length <= 8) {
+                switchRoom(trimmed);
+              } else {
+                Alert.alert('Invalid Code', 'Room code must be 4-8 characters.');
+              }
+            },
+          },
+        ],
+        'plain-text',
+        '',
+        'default',
+      );
+    } else {
+      // Android / Web: use modal
+      setRoomModalVisible(true);
+    }
+  };
+
+  const submitRoomSwitch = () => {
+    const trimmed = roomDraft.trim().toUpperCase();
+    setRoomModalVisible(false);
+    if (trimmed.length >= 4 && trimmed.length <= 8) {
+      switchRoom(trimmed);
+    } else {
+      Alert.alert('Invalid Code', 'Room code must be 4-8 characters.');
+    }
+  };
 
   const colors = Colors[theme];
   const insets = useSafeAreaInsets();
@@ -147,11 +195,25 @@ export default function CommandCenterDrawer(props: DrawerContentComponentProps) 
             {statusText}
           </Text>
           {relayCode && (
-            <Text style={[styles.roomCode, { color: colors.textMuted }]}>
-              {relayCode}
-            </Text>
+            <TouchableOpacity onPress={handleChangeRoom} style={styles.roomCodeBtn}>
+              <Text style={[styles.roomCode, { color: colors.textMuted }]}>
+                {relayCode}
+              </Text>
+              <Ionicons name="swap-horizontal" size={12} color={colors.textMuted} style={{ marginLeft: 4 }} />
+            </TouchableOpacity>
           )}
         </View>
+
+        {/* Switch Room button — visible when connected via relay */}
+        {relayCode && connectionStatus === 'authenticated' && (
+          <TouchableOpacity
+            style={[styles.switchRoomBtn, { borderColor: colors.border }]}
+            onPress={handleChangeRoom}
+          >
+            <Ionicons name="swap-horizontal" size={14} color={colors.primary} />
+            <Text style={[styles.switchRoomText, { color: colors.primary }]}>Switch Room</Text>
+          </TouchableOpacity>
+        )}
 
         {/* Workspace info */}
         {workspace && (
@@ -195,6 +257,49 @@ export default function CommandCenterDrawer(props: DrawerContentComponentProps) 
           v0.2.0
         </Text>
       </View>
+
+      {/* Room Switch Modal (Android / Web) */}
+      <Modal
+        visible={roomModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRoomModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalBox, { backgroundColor: colors.surface }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Switch Room</Text>
+            <Text style={[styles.modalSubtitle, { color: colors.textMuted }]}>
+              Enter a new room code:
+            </Text>
+            <TextInput
+              style={[styles.modalInput, { backgroundColor: colors.background, color: colors.text, borderColor: colors.border }]}
+              value={roomDraft}
+              onChangeText={setRoomDraft}
+              placeholder="e.g. ABC123"
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              maxLength={8}
+              autoFocus
+              onSubmitEditing={submitRoomSwitch}
+            />
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.border }]}
+                onPress={() => setRoomModalVisible(false)}
+              >
+                <Text style={[styles.modalBtnText, { color: colors.text }]}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.primary }]}
+                onPress={submitRoomSwitch}
+              >
+                <Text style={styles.modalBtnText}>Switch</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -363,5 +468,75 @@ const styles = StyleSheet.create({
     fontSize: 10,
     textAlign: 'center',
     paddingVertical: Spacing.xs,
+  },
+
+  // Room code tappable area
+  roomCodeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  // Switch Room button
+  switchRoomBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: Spacing.sm,
+    paddingVertical: Spacing.xs + 2,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+  },
+  switchRoomText: {
+    fontSize: FontSize.xs,
+    fontWeight: '600',
+  },
+
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  modalBox: {
+    width: 300,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.lg,
+  },
+  modalTitle: {
+    fontSize: FontSize.lg,
+    fontWeight: '700',
+    marginBottom: Spacing.xs,
+  },
+  modalSubtitle: {
+    fontSize: FontSize.sm,
+    marginBottom: Spacing.md,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    fontSize: FontSize.lg,
+    fontWeight: '600',
+    letterSpacing: 3,
+    textAlign: 'center',
+    marginBottom: Spacing.md,
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  modalBtn: {
+    flex: 1,
+    paddingVertical: Spacing.sm,
+    borderRadius: BorderRadius.md,
+    alignItems: 'center',
+  },
+  modalBtnText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: FontSize.sm,
   },
 });

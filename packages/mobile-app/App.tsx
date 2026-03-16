@@ -9,7 +9,7 @@ import 'react-native-gesture-handler';
 import React, { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
-import { createDrawerNavigator } from '@react-navigation/drawer';
+import { createDrawerNavigator, DrawerContentComponentProps, DrawerNavigationProp } from '@react-navigation/drawer';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { View, ActivityIndicator, StyleSheet, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -61,12 +61,14 @@ export default function App() {
 
     // Only auto-reconnect if we have a saved session (was previously authenticated)
     if (state.relayUrl && state.relayCode && state.sessionId) {
-      state.connectRelay(state.relayUrl, state.relayCode);
+      // Always use current relayServerUrl (not stale saved relayUrl which may be localhost)
+      state.connectRelay(state.relayServerUrl, state.relayCode);
     }
     // Direct mode requires explicit reconnection — no auto-connect
   }, [loading]);
 
   const isAuthenticated = connectionStatus === 'authenticated';
+  const isSwitchingRoom = useAppStore((s) => s.isSwitchingRoom);
 
   const navTheme = theme === 'dark' ? {
     ...DarkTheme,
@@ -84,8 +86,8 @@ export default function App() {
     );
   }
 
-  // Show connect screen if not authenticated
-  if (!isAuthenticated) {
+  // Show connect screen if not authenticated (but not during room switch)
+  if (!isAuthenticated && !isSwitchingRoom) {
     return (
       <GestureHandlerRootView style={styles.flex}>
         <SafeAreaProvider>
@@ -115,8 +117,8 @@ export default function App() {
         <StatusBar style={theme === 'dark' ? 'light' : 'dark'} />
         <NavigationContainer theme={navTheme}>
           <Drawer.Navigator
-            drawerContent={(props) => <CommandCenterDrawer {...props} />}
-            screenOptions={({ navigation }) => ({
+            drawerContent={(props: DrawerContentComponentProps) => <CommandCenterDrawer {...props} />}
+            screenOptions={({ navigation }: { navigation: DrawerNavigationProp<any> }) => ({
               ...screenOptions,
               headerLeft: () => (
                 <TouchableOpacity

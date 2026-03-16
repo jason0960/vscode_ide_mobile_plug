@@ -141,6 +141,13 @@ export class ConnectionManager {
       console.log('[WS] Closed:', event.code, event.reason);
       this.stopHeartbeat();
 
+      // HTTP error codes from failed WebSocket upgrade (e.g. 406 from proxy)
+      if (event.code >= 400 && event.code < 500) {
+        this.setStatus('disconnected');
+        this.onError(`Server rejected connection (HTTP ${event.code}). Check relay URL.`);
+        return;
+      }
+
       // Fatal close codes — don't reconnect
       if (event.code === 4003) {
         this.setStatus('disconnected');
