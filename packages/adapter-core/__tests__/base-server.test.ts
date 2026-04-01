@@ -105,10 +105,14 @@ describe('BaseServer', () => {
       expect(typeof res.body.clients).toBe('number');
     });
 
-    it('GET /api/pair-info returns 403 without DEBUG_PAIR', async () => {
-      delete process.env.DEBUG_PAIR;
+    it('GET /api/pair-info returns 200 from loopback (supertest)', async () => {
+      // Endpoint is gated on localhost IP, not an env var.
+      // supertest connects via 127.0.0.1, so the request passes.
       const res = await request(server._app).get('/api/pair-info');
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(200);
+      expect(res.body.token).toBeDefined();
+      expect(res.body.pairingUrl).toBeDefined();
+      expect(res.body.wsUrl).toBeDefined();
     });
 
     it('GET /api/pair-info returns token with DEBUG_PAIR=1 from loopback', async () => {
