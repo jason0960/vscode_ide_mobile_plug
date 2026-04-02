@@ -176,7 +176,6 @@ export interface PubSubTransportOptions {
 
   /** Unique user/session ID for message routing. */
   userId: string;
-  userId: string;
 
   /** Logger instance. */
   logger: ILogger;
@@ -192,6 +191,12 @@ export interface PubSubTransportOptions {
 
   /** Max messages per pull (defaults to PUBSUB_MAX_MESSAGES_PER_PULL). */
   maxMessagesPerPull?: number;
+
+  /** URL of the relay server for pairing code exchange (e.g. https://gopilot-relay.onrender.com). */
+  pairingRelayUrl?: string;
+
+  /** Token refresh interval in ms (defaults to 45 minutes). */
+  tokenRefreshIntervalMs?: number;
 }
 
 // ─── PubSubTransport ─────────────────────────────────────
@@ -239,12 +244,18 @@ export class PubSubTransport {
   private readonly tokenProvider: TokenProvider;
   private readonly pollIntervalMs: number;
   private readonly maxMessagesPerPull: number;
+  private readonly pairingRelayUrl: string | null;
+  private readonly tokenRefreshIntervalMs: number;
+
+  /** Default token refresh interval: 45 minutes (tokens expire after 60 min). */
+  private static readonly DEFAULT_TOKEN_REFRESH_MS = 45 * 60 * 1000;
 
   private readonly topicPath: string;
   private readonly subscriptionPath: string;
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
+  private tokenRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private isPolling = false;
   private disposed = false;
   private connected = false;
@@ -264,6 +275,8 @@ export class PubSubTransport {
     this.tokenProvider = options.tokenProvider ?? new AdcTokenProvider();
     this.pollIntervalMs = options.pollIntervalMs ?? PUBSUB_POLL_INTERVAL_MS;
     this.maxMessagesPerPull = options.maxMessagesPerPull ?? PUBSUB_MAX_MESSAGES_PER_PULL;
+    this.pairingRelayUrl = options.pairingRelayUrl ?? null;
+    this.tokenRefreshIntervalMs = options.tokenRefreshIntervalMs ?? PubSubTransport.DEFAULT_TOKEN_REFRESH_MS;
 
     this.topicPath = `projects/${this.config.projectId}/topics/${this.config.topicName}`;
     this.subscriptionPath = `projects/${this.config.projectId}/subscriptions/${this.config.subscriptionName}`;
@@ -282,10 +295,10 @@ export class PubSubTransport {
   }
 
   /**
-   * Connect to Pub/Sub: validate credentials, start polling.
+   * Connect to Pub/Sub: validate credentials, register pairing code with relay, start polling.
    * Returns a pairing code that mobile clients use to connect.
    *
-   * @returns The pairing code (derived from userId).
+   * @returns The pairing code (from relay exchange if configured, else derived from userId).
    * @throws If credentials are invalid or Pub/Sub API is unreachable.
    */
   async connect(): Promise<string> {
@@ -309,9 +322,14 @@ export class PubSubTransport {
       throw new Error(`Pub/Sub credential validation failed (${testResp.status}): ${errText}`);
     }
 
-    // Generate pairing code from userId (deterministic so reconnects get same code)
-    this.pairingCode = this.userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase()
-      || crypto.randomBytes(3).toString('hex').toUpperCase();
+    // Register pairing code with the relay server (if configured)
+    if (this.pairingRelayUrl) {
+      this.pairingCode = await this.registerPairingCode();
+    } else {
+      // Fallback: generate deterministic code from userId
+      this.pairingCode = this.userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase()
+        || crypto.randomBytes(3).toString('hex').toUpperCase();
+    }
 
     this.connected = true;
 
@@ -320,6 +338,9 @@ export class PubSubTransport {
 
     // Start health checks
     this.startHealthChecks();
+
+    // Start token refresh timer
+    this.startTokenRefresh();
 
     this.logger.info(`[PubSub] Connected. Pairing code: ${this.pairingCode}`);
     this.onRoomCreated.fire({ code: this.pairingCode });
@@ -385,6 +406,7 @@ export class PubSubTransport {
   disconnect(): void {
     this.stopPolling();
     this.stopHealthChecks();
+    this.stopTokenRefresh();
     this.connected = false;
     this.pairingCode = null;
     this.clientCount = 0;
@@ -421,6 +443,124 @@ export class PubSubTransport {
       accessToken: token,
       tokenExpiry: Date.now() + 3_600_000,
     };
+  }
+
+  // ─── Pairing Code Exchange ─────────────────────────────
+
+  /**
+   * Register Pub/Sub pairing info with the relay server.
+   * POSTs the full PubSubPairingInfo blob to `/pair`, gets back a short code.
+   * Mobile can then `GET /pair/:code` to fetch the pairing info.
+   */
+  private async registerPairingCode(): Promise<string> {
+    const pairingInfo = await this.getPairingInfo();
+    const url = `${this.pairingRelayUrl}/pair`;
+
+    this.logger.info(`[PubSub] Registering pairing code with relay: ${url}`);
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pairingInfo),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Pairing registration failed (${resp.status}): ${errText}`);
+    }
+
+    const { code } = await resp.json() as { code: string };
+    this.logger.info(`[PubSub] Pairing code registered: ${code}`);
+    return code;
+  }
+
+  // ─── Token Refresh ─────────────────────────────────────
+
+  /**
+   * Start a periodic timer that refreshes the access token and pushes
+   * the new token to the mobile client via a `token_refresh` Pub/Sub message.
+   * Runs every 45 minutes (tokens expire after ~60 min).
+   */
+  private startTokenRefresh(): void {
+    this.tokenRefreshTimer = setInterval(async () => {
+      try {
+        await this.refreshAndPushToken();
+      } catch (err: any) {
+        this.logger.error(`[PubSub] Token refresh failed: ${err.message}`);
+      }
+    }, this.tokenRefreshIntervalMs);
+  }
+
+  private stopTokenRefresh(): void {
+    if (this.tokenRefreshTimer) {
+      clearInterval(this.tokenRefreshTimer);
+      this.tokenRefreshTimer = null;
+    }
+  }
+
+  /**
+   * Fetch a fresh token, then publish a `token_refresh` message so the
+   * mobile client can update its stored access token without reconnecting.
+   */
+  async refreshAndPushToken(): Promise<void> {
+    this.logger.info('[PubSub] Refreshing access token...');
+
+    // Force a new token fetch (invalidate cache by requesting a fresh one)
+    const freshToken = await this.tokenProvider.getToken();
+    const tokenExpiry = Date.now() + 3_600_000;
+
+    // Publish token refresh as a special message type
+    const envelope: PubSubEnvelope = {
+      id: crypto.randomUUID(),
+      userId: this.userId,
+      direction: 'ext_to_mobile',
+      messageType: 'token_refresh' as any,
+      payload: JSON.stringify({
+        accessToken: freshToken,
+        tokenExpiry,
+      }),
+      timestamp: Date.now(),
+    };
+
+    const base64Data = Buffer.from(JSON.stringify(envelope)).toString('base64');
+
+    const token = freshToken;
+    const resp = await this.http.post(
+      `${PUBSUB_API_BASE_URL}/${this.topicPath}:publish`,
+      {
+        messages: [{
+          data: base64Data,
+          attributes: {
+            direction: 'ext_to_mobile',
+            userId: this.userId,
+            messageType: 'token_refresh',
+          },
+          orderingKey: this.userId,
+        }],
+      },
+      token,
+    );
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Token refresh publish failed (${resp.status}): ${errText}`);
+    }
+
+    this.logger.info(`[PubSub] Token refresh published. Expires at ${new Date(tokenExpiry).toISOString()}`);
+
+    // Also re-register with the relay so new mobile clients get the fresh token
+    if (this.pairingRelayUrl) {
+      try {
+        const newCode = await this.registerPairingCode();
+        if (newCode !== this.pairingCode) {
+          this.pairingCode = newCode;
+          this.onRoomCreated.fire({ code: newCode });
+          this.logger.info(`[PubSub] Pairing code updated after token refresh: ${newCode}`);
+        }
+      } catch (err: any) {
+        this.logger.error(`[PubSub] Re-registration after token refresh failed: ${err.message}`);
+      }
+    }
   }
 
   // ─── Polling ───────────────────────────────────────────

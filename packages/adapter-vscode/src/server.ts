@@ -180,6 +180,8 @@ export class VsCodeServer extends BaseServer {
 
       logger.info(`[Transport] Using Pub/Sub: project=${projectId}, topic=${topicName}, sub=${subscriptionName}`);
 
+      const pairingRelayUrl = config.get<string>('pairingRelayUrl', 'https://gopilot-relay.onrender.com');
+
       return new PubSubTransport({
         config: {
           projectId,
@@ -189,6 +191,7 @@ export class VsCodeServer extends BaseServer {
         mobileSubscriptionName,
         userId,
         logger,
+        pairingRelayUrl: pairingRelayUrl || undefined,
       });
     }
 

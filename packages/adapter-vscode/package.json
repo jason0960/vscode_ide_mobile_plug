@@ -147,6 +147,11 @@
           "default": "GoPilot-mobile-sub",
           "markdownDescription": "Pub/Sub subscription name for the mobile app to pull from (extension → mobile messages). Included in pairing info."
         },
+        "mobileCopilot.pairingRelayUrl": {
+          "type": "string",
+          "default": "https://gopilot-relay.onrender.com",
+          "markdownDescription": "HTTP URL of the relay server used for the pairing code exchange. The extension POSTs Pub/Sub pairing info here and gets back a short room code that the mobile app can fetch."
+        },
         "mobileCopilot.captureMode": {
           "type": "string",
           "enum": [

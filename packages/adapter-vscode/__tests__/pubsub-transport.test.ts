@@ -857,4 +857,164 @@ describe('PubSubTransport', () => {
       t.dispose();
     });
   });
+
+  // ─── Pairing Code Exchange ───────────────────────────────
+
+  describe('pairing code exchange', () => {
+    it('should register pairing code via relay when pairingRelayUrl is set', async () => {
+      // Mock global fetch for the /pair POST
+      const originalFetch = global.fetch;
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({ code: 'XYZ789' }),
+        text: async () => '{"code":"XYZ789"}',
+      }) as any;
+
+      const options = createTransportOptions({
+        pairingRelayUrl: 'https://test-relay.example.com',
+      });
+      const t = new PubSubTransport(options);
+
+      const code = await t.connect();
+      expect(code).toBe('XYZ789');
+      expect(t.code).toBe('XYZ789');
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://test-relay.example.com/pair',
+        expect.objectContaining({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+      t.dispose();
+      global.fetch = originalFetch;
+    });
+
+    it('should fall back to deterministic code when pairingRelayUrl is not set', async () => {
+      const options = createTransportOptions(); // no pairingRelayUrl
+      const t = new PubSubTransport(options);
+
+      const code = await t.connect();
+      // Without relay, code is derived from userId
+      expect(code).toMatch(/^[A-Z0-9]+$/);
+      expect(code.length).toBeLessThanOrEqual(6);
+
+      t.dispose();
+    });
+
+    it('should throw when relay registration fails', async () => {
+      const originalFetch = global.fetch;
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: 'server error' }),
+        text: async () => 'server error',
+      }) as any;
+
+      const options = createTransportOptions({
+        pairingRelayUrl: 'https://test-relay.example.com',
+      });
+      const t = new PubSubTransport(options);
+
+      await expect(t.connect()).rejects.toThrow('Pairing registration failed');
+
+      t.dispose();
+      global.fetch = originalFetch;
+    });
+  });
+
+  // ─── Token Refresh ────────────────────────────────────────
+
+  describe('token refresh', () => {
+    it('should publish a token_refresh message via Pub/Sub', async () => {
+      const httpClient = createMockHttpClient();
+      const tokenProvider = createMockTokenProvider('fresh-token-abc');
+      const options = createTransportOptions({
+        httpClient,
+        tokenProvider,
+      });
+      const t = new PubSubTransport(options);
+
+      // Manually connect (skip the relay registration)
+      (t as any).connected = true;
+      (t as any).disposed = false;
+      httpClient.setNextJsonResponse({ messageIds: ['1'] });
+
+      await t.refreshAndPushToken();
+
+      // Find the publish call (to the topic)
+      const publishCalls = httpClient.calls.filter(c => c.url.includes(':publish'));
+      expect(publishCalls.length).toBeGreaterThanOrEqual(1);
+
+      const publishBody = publishCalls[0].body as any;
+      const rawData = Buffer.from(publishBody.messages[0].data, 'base64').toString('utf-8');
+      const envelope = JSON.parse(rawData);
+
+      expect(envelope.messageType).toBe('token_refresh');
+      expect(envelope.direction).toBe('ext_to_mobile');
+      const payload = JSON.parse(envelope.payload);
+      expect(payload.accessToken).toBe('fresh-token-abc');
+      expect(payload.tokenExpiry).toBeGreaterThan(Date.now());
+
+      t.dispose();
+    });
+
+    it('should start token refresh timer on connect', async () => {
+      const options = createTransportOptions({
+        tokenRefreshIntervalMs: 100, // Very short for testing
+      });
+      const t = new PubSubTransport(options);
+      await t.connect();
+
+      // Timer should be set
+      expect((t as any).tokenRefreshTimer).not.toBeNull();
+
+      t.dispose();
+    });
+
+    it('should stop token refresh timer on disconnect', async () => {
+      const options = createTransportOptions();
+      const t = new PubSubTransport(options);
+      await t.connect();
+      t.disconnect();
+
+      expect((t as any).tokenRefreshTimer).toBeNull();
+    });
+
+    it('should re-register pairing code after token refresh when relay is configured', async () => {
+      const originalFetch = global.fetch;
+      let fetchCallCount = 0;
+      global.fetch = jest.fn().mockImplementation(async () => {
+        fetchCallCount++;
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({ code: `CODE${fetchCallCount}` }),
+          text: async () => `{"code":"CODE${fetchCallCount}"}`,
+        };
+      }) as any;
+
+      const httpClient = createMockHttpClient();
+      const tokenProvider = createMockTokenProvider('token-1');
+      const options = createTransportOptions({
+        httpClient,
+        tokenProvider,
+        pairingRelayUrl: 'https://test-relay.example.com',
+      });
+      const t = new PubSubTransport(options);
+
+      // Connect (registers first pairing code)
+      await t.connect();
+      expect(t.code).toBe('CODE1');
+
+      // Trigger token refresh (should re-register)
+      httpClient.setNextJsonResponse({ messageIds: ['pub-1'] }); // For the publish call
+      await t.refreshAndPushToken();
+      expect(t.code).toBe('CODE2');
+
+      t.dispose();
+      global.fetch = originalFetch;
+    });
+  });
 });
