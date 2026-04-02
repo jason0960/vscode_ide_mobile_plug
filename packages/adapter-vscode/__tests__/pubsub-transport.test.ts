@@ -309,13 +309,15 @@ describe('PubSubTransport', () => {
       expect(msg.attributes.messageType).toBe('rpc');
       expect(msg.orderingKey).toBe('user123');
 
-      // Decode the envelope
+      // Decode the Avro-encoded envelope
       const decoded = JSON.parse(Buffer.from(msg.data, 'base64').toString('utf-8'));
       expect(decoded.id).toBe('test-uuid-1234');
       expect(decoded.userId).toBe('user123');
       expect(decoded.direction).toBe('ext_to_mobile');
       expect(decoded.messageType).toBe('rpc');
-      expect(decoded.payload).toBe(rpcPayload);
+      // Avro union encoding: payload is {"string": "..."} not a bare string
+      expect(decoded.payload).toEqual({ string: rpcPayload });
+      expect(decoded.correlationId).toBeNull();
       expect(decoded.timestamp).toBeDefined();
     });
 
@@ -953,7 +955,11 @@ describe('PubSubTransport', () => {
 
       expect(envelope.messageType).toBe('token_refresh');
       expect(envelope.direction).toBe('ext_to_mobile');
-      const payload = JSON.parse(envelope.payload);
+      // Avro union encoding: payload is {"string": "..."}
+      const payloadStr = typeof envelope.payload === 'object' && envelope.payload?.string
+        ? envelope.payload.string
+        : envelope.payload;
+      const payload = JSON.parse(payloadStr);
       expect(payload.accessToken).toBe('fresh-token-abc');
       expect(payload.tokenExpiry).toBeGreaterThan(Date.now());
 

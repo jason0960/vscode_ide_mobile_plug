@@ -1,3 +1,5 @@
 {
-    "mobileCopilot.tunnelProvider": "vscode"
+    "mobileCopilot.tunnelProvider": "vscode",
+    "mobileCopilot.transportType": "pubsub",
+    "mobileCopilot.autoStart": true
 }

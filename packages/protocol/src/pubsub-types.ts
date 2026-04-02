@@ -28,11 +28,14 @@ export type PubSubDirection = 'mobile_to_ext' | 'ext_to_mobile';
  * Maps to RPC message types but is transport-specific.
  */
 export type PubSubMessageType =
-  | 'rpc'           // Full RPC message (request, response, stream, event, error)
-  | 'auth'          // Authentication handshake
-  | 'heartbeat'     // Keep-alive ping
-  | 'pairing'       // Initial pairing handshake
-  | 'disconnect';   // Graceful disconnect notification
+  | 'rpc'             // Full RPC message (request, response, stream, event, error)
+  | 'auth'            // Authentication handshake
+  | 'heartbeat'       // Keep-alive ping
+  | 'pairing'         // Initial pairing handshake
+  | 'disconnect'      // Graceful disconnect notification
+  | 'connect'         // Connection established
+  | 'token_refresh'   // Extension pushes refreshed access token
+  | 'event';          // Generic event
 
 /**
  * The canonical Pub/Sub message envelope.

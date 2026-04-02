@@ -75,6 +75,60 @@ export class FetchHttpClient implements PubSubHttpClient {
   }
 }
 
+// ─── Avro JSON Encoding Helpers ──────────────────────────
+
+/**
+ * Wrap a PubSubEnvelope for Avro JSON encoding.
+ *
+ * The GoPilotSchemaV2 Avro schema declares `correlationId` and `payload` as
+ * union types `["null", "string"]`.  Avro JSON encoding represents these as
+ * either `null` or `{"string": "value"}`.  This function converts from the
+ * TypeScript-natural shape (plain strings / undefined) to the Avro shape
+ * so that Pub/Sub schema validation passes.
+ */
+export function toAvroJson(envelope: PubSubEnvelope): Record<string, unknown> {
+  return {
+    id: envelope.id,
+    correlationId: envelope.correlationId
+      ? { string: envelope.correlationId }
+      : null,
+    userId: envelope.userId,
+    direction: envelope.direction,
+    messageType: envelope.messageType,
+    payload: envelope.payload
+      ? { string: envelope.payload }
+      : null,
+    timestamp: envelope.timestamp,
+  };
+}
+
+/**
+ * Unwrap a JSON-parsed Avro record back into a normal PubSubEnvelope.
+ *
+ * Handles both Avro union shapes (`{"string":"val"}` / `null`) *and*
+ * the plain-string shape so that old messages still decode correctly.
+ */
+export function fromAvroJson(raw: Record<string, unknown>): PubSubEnvelope {
+  const unwrap = (v: unknown): string | undefined => {
+    if (v === null || v === undefined) return undefined;
+    if (typeof v === 'string') return v;
+    if (typeof v === 'object' && v !== null && 'string' in v) {
+      return (v as { string: string }).string;
+    }
+    return undefined;
+  };
+
+  return {
+    id: raw.id as string,
+    correlationId: unwrap(raw.correlationId),
+    userId: raw.userId as string,
+    direction: raw.direction as PubSubEnvelope['direction'],
+    messageType: raw.messageType as PubSubEnvelope['messageType'],
+    payload: unwrap(raw.payload) ?? '',
+    timestamp: raw.timestamp as number,
+  };
+}
+
 // ─── Token Provider (injectable for testing) ─────────────
 
 /**
@@ -369,7 +423,7 @@ export class PubSubTransport {
       timestamp: Date.now(),
     };
 
-    const base64Data = Buffer.from(JSON.stringify(envelope)).toString('base64');
+    const base64Data = Buffer.from(JSON.stringify(toAvroJson(envelope))).toString('base64');
 
     try {
       const token = await this.tokenProvider.getToken();
@@ -514,7 +568,7 @@ export class PubSubTransport {
       id: crypto.randomUUID(),
       userId: this.userId,
       direction: 'ext_to_mobile',
-      messageType: 'token_refresh' as any,
+      messageType: 'token_refresh',
       payload: JSON.stringify({
         accessToken: freshToken,
         tokenExpiry,
@@ -522,7 +576,7 @@ export class PubSubTransport {
       timestamp: Date.now(),
     };
 
-    const base64Data = Buffer.from(JSON.stringify(envelope)).toString('base64');
+    const base64Data = Buffer.from(JSON.stringify(toAvroJson(envelope))).toString('base64');
 
     const token = freshToken;
     const resp = await this.http.post(
@@ -623,7 +677,7 @@ export class PubSubTransport {
 
         try {
           const raw = Buffer.from(received.message.data, 'base64').toString('utf-8');
-          const envelope: PubSubEnvelope = JSON.parse(raw);
+          const envelope: PubSubEnvelope = fromAvroJson(JSON.parse(raw));
 
           // Deduplication
           if (this.processedIds.has(envelope.id)) {
