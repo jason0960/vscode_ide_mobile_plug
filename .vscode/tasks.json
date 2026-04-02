@@ -2,9 +2,26 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "Start Mobile App (Metro)",
+			"label": "Build Extension",
 			"type": "shell",
-			"command": "cd ${workspaceFolder}/packages/mobile-app && CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start --web --clear",
+			"command": "npm run build",
+			"problemMatcher": [],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		},
+		{
+			"label": "Run Tests",
+			"type": "shell",
+			"command": "npm test",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Watch Build",
+			"type": "shell",
+			"command": "npm run watch",
 			"isBackground": true,
 			"problemMatcher": []
 		}

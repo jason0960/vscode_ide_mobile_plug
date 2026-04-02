@@ -25,11 +25,32 @@ const WorkspaceEdit = jest.fn(() => ({
   delete: jest.fn(),
 }));
 
-const EventEmitter = jest.fn(() => ({
-  event: jest.fn(),
-  fire: jest.fn(),
-  dispose: jest.fn(),
-}));
+/**
+ * Functional EventEmitter mock that actually fires listeners,
+ * matching the real VS Code API: `emitter.event(listener)` subscribes,
+ * `emitter.fire(data)` invokes all listeners.
+ */
+const EventEmitter = jest.fn().mockImplementation(() => {
+  const listeners: Array<(e: any) => void> = [];
+  const event = jest.fn((listener: (e: any) => void) => {
+    listeners.push(listener);
+    return {
+      dispose: () => {
+        const idx = listeners.indexOf(listener);
+        if (idx >= 0) listeners.splice(idx, 1);
+      },
+    };
+  });
+  const fire = jest.fn((data: any) => {
+    for (const listener of [...listeners]) {
+      listener(data);
+    }
+  });
+  const dispose = jest.fn(() => {
+    listeners.length = 0;
+  });
+  return { event, fire, dispose };
+});
 
 const workspace = {
   workspaceFolders: [{ uri: { fsPath: '/mock/workspace' }, name: 'mock', index: 0 }],
@@ -83,6 +104,9 @@ const window = {
   showInformationMessage: jest.fn().mockResolvedValue(undefined),
   showWarningMessage: jest.fn(),
   showErrorMessage: jest.fn(),
+  showQuickPick: jest.fn().mockResolvedValue(undefined),
+  showInputBox: jest.fn().mockResolvedValue(undefined),
+  withProgress: jest.fn((_opts: any, task: any) => task({ report: jest.fn() })),
   createWebviewPanel: jest.fn(() => ({
     webview: { html: '' },
     dispose: jest.fn(),
@@ -110,6 +134,8 @@ const languages = {
 const StatusBarAlignment = { Left: 1, Right: 2 };
 const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
 const FileType = { Unknown: 0, File: 1, Directory: 2, SymbolicLink: 64 };
+const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3 };
+const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };
 
 // Language Model API stubs
 const lm = {
@@ -177,6 +203,8 @@ module.exports = {
   StatusBarAlignment,
   DiagnosticSeverity,
   FileType,
+  ViewColumn,
+  ProgressLocation,
   LanguageModelChatMessage,
   LanguageModelError,
   CancellationTokenSource,

@@ -121,15 +121,9 @@ Reload VS Code: `Ctrl+Shift+P` → **Developer: Reload Window**
 
 ### Relay Mode + Mobile App (recommended)
 
-Use the **React Native mobile app** with a central relay server — works across any network without tunnels.
+The system is split into 3 independent repos. Use the **React Native mobile app** (`gopilot-mobile`) with the cloud relay server (`gopilot-relay`).
 
-**Terminal 1 — Relay Server:**
-```bash
-cd packages/relay-server
-npm run build && npm start       # Starts on http://localhost:4800
-```
-
-**Terminal 2 — VS Code Extension:**
+**VS Code Extension:**
 ```bash
 npm run build                    # Build the extension
 npm run install-ext              # Install into VS Code
@@ -138,9 +132,16 @@ npm run install-ext              # Install into VS Code
 # Note the 6-character room code displayed
 ```
 
-**Terminal 3 — Mobile App:**
+**Relay Server** (separate repo — `gopilot-relay`):
 ```bash
-cd packages/mobile-app
+cd ../gopilot-relay
+npm install && npm start         # Starts on http://localhost:4800
+```
+
+**Mobile App** (separate repo — `gopilot-mobile`):
+```bash
+cd ../gopilot-mobile
+npm install
 CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start --web --clear   # Metro on port 8081
 ```
 
@@ -322,13 +323,17 @@ app.js ←──── WebSocket ────→  server.ts     Express + WebSoc
 
 ### Monorepo Structure
 
+This repo contains the VS Code extension packages. The relay server and mobile app live in their own repos.
+
 ```
 packages/
   protocol/        — Shared types & JSON-RPC handler (portable, no IDE deps)
   adapter-core/    — Base server with auth, RPC, session management
   adapter-vscode/  — VS Code extension: Copilot bridge, relay client, tunnel
-  relay-server/    — Standalone WebSocket relay hub (room-based, 6-char codes)
-  mobile-app/      — React Native Expo app (Zustand, WebSocket, RPC client)
+
+# Separate repos:
+# gopilot-relay   — Standalone WebSocket relay hub (room-based, 6-char codes)
+# gopilot-mobile  — React Native Expo app (Zustand, WebSocket, RPC client)
 ```
 
 ### Install & Build
@@ -342,24 +347,20 @@ npm run build:relay            # Build relay server only
 
 ### Running the Full Stack
 
-You need **three components** running to test the relay flow:
+You need **three components** running to test the relay flow. The relay server and mobile app are in separate repos.
 
 #### 1. Relay Server (port 4800)
 
+See the `gopilot-relay` repo:
 ```bash
-npm run build:relay            # Build first
-npm run start:relay            # Starts on http://localhost:4800
+cd ../gopilot-relay
+npm start                        # Starts on http://localhost:4800
 ```
 
 Health check: `curl http://localhost:4800/health`
 List rooms: `curl http://localhost:4800/rooms`
 
-Environment variables:
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `4800` | Server listen port |
-| `ROOM_TTL_MS` | `14400000` (4h) | Room inactivity timeout |
-| `MAX_ROOMS` | `1000` | Max concurrent rooms |
+Or use the cloud relay: `wss://gopilot-relay.onrender.com`
 
 #### 2. VS Code Extension
 
@@ -382,10 +383,9 @@ Then: `Ctrl+Shift+P` → **Mobile Copilot: Connect Cloud Relay** → shows a 6-c
 
 #### 3. Mobile App (React Native / Expo)
 
+See the `gopilot-mobile` repo:
 ```bash
-npm run start:mobile           # Start from repo root
-# OR
-cd packages/mobile-app
+cd ../gopilot-mobile
 CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start --web --clear
 ```
 
@@ -475,8 +475,8 @@ npm run test:watch             # Watch mode
 | **protocol** | 100% | 100% | JSON-RPC handler |
 | **adapter-core** | 93.8% | 94.5% | Auth, base server, tunnel |
 | **adapter-vscode** | 66.6% | 67.0% | server.ts (75%), agent.ts (93%), copilot.ts (79%) |
-| **relay-server** | 83.1% | 84.8% | Relay hub with DoS protections |
-| **mobile-app (API)** | 97.3% | 98.3% | WebSocket connection + RPC client |
+
+> Relay server and mobile app coverage tracked in their respective repos (`gopilot-relay`, `gopilot-mobile`).
 
 ### CI/CD
 

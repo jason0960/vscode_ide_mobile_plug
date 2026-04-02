@@ -11,6 +11,5 @@
       "path": "packages/adapter-vscode"
     }
   ],
-  "compilerOptions": {},
-  "extends": "expo/tsconfig.base"
+  "compilerOptions": {}
 }

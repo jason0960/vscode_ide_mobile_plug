@@ -11,10 +11,6 @@ const config: Config = {
   },
   collectCoverageFrom: [
     'packages/*/src/**/*.ts',
-    '!packages/mobile-app/src/store/**',
-    '!packages/mobile-app/src/theme/**',
-    '!packages/mobile-app/src/screens/**',
-    '!packages/mobile-app/src/components/**',
     '!**/node_modules/**',
     '!**/__tests__/**',
   ],
@@ -46,7 +42,6 @@ const config: Config = {
     }],
   },
   // Mock vscode API for adapter-vscode tests
-  // mobile-app API layer (connection.ts, rpc.ts) is testable under node; screens/components are excluded
   modulePathIgnorePatterns: [],
   // Silence noisy console.log/warn/error from source code during tests
   silent: true,

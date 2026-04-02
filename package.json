@@ -7,14 +7,15 @@
   "workspaces": [
     "packages/protocol",
     "packages/adapter-core",
-    "packages/adapter-vscode",
-    "packages/mobile-app"
+    "packages/adapter-vscode"
   ],
   "scripts": {
     "build": "node packages/adapter-vscode/esbuild.js",
     "build:all": "node packages/adapter-vscode/esbuild.js",
-    "start:mobile": "cd packages/mobile-app && CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start",
     "watch": "node packages/adapter-vscode/esbuild.js --watch",
+    "test": "jest --forceExit",
+    "test:coverage": "jest --coverage --forceExit",
+    "test:watch": "jest --watch",
     "typecheck": "tsc --build packages/protocol packages/adapter-core",
     "clean": "rm -rf packages/*/dist",
     "package": "cd packages/adapter-vscode && npx @vscode/vsce package --no-dependencies --allow-missing-repository",
@@ -32,19 +33,13 @@
     "jest": "^29.7.0",
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.9",
+    "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   },
   "dependencies": {
     "express": "^4.18.2",
     "nanoid": "^3.3.7",
     "qrcode": "^1.5.3",
-    "react-native-worklets": "0.5.1",
     "ws": "^8.16.0"
-  },
-  "overrides": {
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "react-native": "0.81.5",
-    "@types/react": "~19.1.10"
   }
 }

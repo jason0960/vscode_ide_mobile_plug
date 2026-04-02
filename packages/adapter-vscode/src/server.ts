@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as crypto from 'crypto';
 import WebSocket = require('ws');
 import { BaseServer } from '@mobile-copilot/adapter-core';
 import type { ILogger } from '@mobile-copilot/adapter-core';
@@ -14,11 +13,12 @@ import { ContextProvider } from './context';
 import { AgentOperations } from './agent';
 import { ChatResponseInterceptor } from './interceptor';
 import { RelayClient } from './relay-client';
+import { PubSubTransport } from './pubsub-transport';
+import type { MobileTransport, TransportType } from './transport';
 import {
   setMobileCallbacks,
   setCurrentMobileRequestId,
 } from './participant';
-import { findSafeBreak } from './stream-utils';
 
 /**
  * VS Code implementation of the Mobile Copilot server.
@@ -30,7 +30,7 @@ export class VsCodeServer extends BaseServer {
   private contextProvider: ContextProvider;
   private agent: AgentOperations;
   private interceptor: ChatResponseInterceptor;
-  private relay: RelayClient;
+  private transport: MobileTransport;
   private statusBarItem: vscode.StatusBarItem;
   private disposables: vscode.Disposable[] = [];
   private extensionContext: vscode.ExtensionContext;
@@ -59,10 +59,10 @@ export class VsCodeServer extends BaseServer {
     this.contextProvider = new ContextProvider();
     this.agent = new AgentOperations(this.contextProvider, logger.channel);
     this.interceptor = new ChatResponseInterceptor(logger.channel);
-    this.relay = new RelayClient(logger, config);
+    this.transport = this.createTransport(logger, config);
 
-    // Relay event wiring
-    this.setupRelayListeners();
+    // Transport event wiring
+    this.setupTransportListeners();
 
     // Status bar
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -73,35 +73,15 @@ export class VsCodeServer extends BaseServer {
   // ─── BaseServer hooks ───────────────────────────────────────────
 
   protected getPort(): number {
-    return this.config.get<number>('port', 3847) ?? 3847;
+    return this.config.get<number>('port', 3847);
   }
 
   protected getStaticFilesPath(): string {
-    const mobilePath = path.join(__dirname, 'mobile');
-    return fs.existsSync(mobilePath) ? mobilePath : '';
+    return ''; // PWA removed — mobile app connects via Pub/Sub
   }
 
   protected setupAdditionalRoutes(): void {
-    const mobilePath = path.join(__dirname, 'mobile');
-    if (fs.existsSync(mobilePath)) {
-      // Extra no-cache middleware for HTML/JS/CSS
-      this.app.use((req, res, next) => {
-        if (req.path.endsWith('.html') || req.path.endsWith('.js') || req.path.endsWith('.css') || req.path === '/') {
-          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-          res.setHeader('Pragma', 'no-cache');
-          res.setHeader('Expires', '0');
-        }
-        next();
-      });
-
-      // SPA fallback
-      this.app.get('*', (req, res) => {
-        if (!req.path.startsWith('/api') && !req.path.startsWith('/ws')) {
-          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-          res.sendFile(path.join(mobilePath, 'index.html'));
-        }
-      });
-    }
+    // No static routes — mobile app uses Pub/Sub transport
   }
 
   protected async onServerStarted(): Promise<void> {
@@ -112,7 +92,7 @@ export class VsCodeServer extends BaseServer {
     const provider = this.config.get<string>('tunnelProvider', 'none');
     if (provider !== 'none') {
       try {
-        const tunnelUrl = await (this.tunnel as VsCodeTunnel).startTunnel(this.port);
+        const tunnelUrl = await this.tunnel.startTunnel(this.port);
         this.logger.info(`Tunnel active: ${tunnelUrl}`);
         this.updateStatusBar('tunnel');
       } catch (err: any) {
@@ -124,12 +104,7 @@ export class VsCodeServer extends BaseServer {
     this.statusBarItem.show();
     this.setupWorkspaceListeners();
 
-    // Show QR
-    await this.showQRCode();
-
-    vscode.window.showInformationMessage(
-      `Mobile Copilot server running on port ${this.port}. Scan the QR code to connect.`
-    );
+    this.logger.info(`Mobile Copilot server running on port ${this.port}`);
   }
 
   protected onServerStopping(): void {
@@ -175,14 +150,58 @@ export class VsCodeServer extends BaseServer {
     }
   }
 
-  // ─── Cloud Relay ────────────────────────────────────────────────
+  // ─── Transport (Relay or Pub/Sub) ───────────────────────────────
 
-  /** Connect to cloud relay and create a room. Returns the room code. */
-  async connectRelay(): Promise<string> {
-    const code = await this.relay.connect();
+  /**
+   * Factory: create the appropriate MobileTransport based on config.
+   *
+   * - `relay`  → WebSocket relay (RelayClient) — connects to a standalone hub
+   * - `pubsub` → Google Cloud Pub/Sub (PubSubTransport) — serverless polling
+   */
+  private createTransport(
+    logger: ILogger,
+    config: VsCodeConfig,
+  ): MobileTransport {
+    const transportType = config.get<TransportType>('transportType', 'relay');
+
+    if (transportType === 'pubsub') {
+      const projectId = config.get<string>('pubsub.projectId', 'project-004bd74a-29f1-45a3-a14');
+      const topicName = config.get<string>('pubsub.topicName', 'GoPilot');
+      const subscriptionName = config.get<string>('pubsub.subscriptionName', 'GoPilot-extension-sub');
+      const mobileSubscriptionName = config.get<string>('pubsub.mobileSubscriptionName', 'GoPilot-mobile-sub');
+
+      if (!projectId) {
+        throw new Error(
+          'Pub/Sub transport requires mobileCopilot.pubsub.projectId to be set.',
+        );
+      }
+
+      const userId = `ext-${vscode.env.machineId.substring(0, 12)}`;
+
+      logger.info(`[Transport] Using Pub/Sub: project=${projectId}, topic=${topicName}, sub=${subscriptionName}`);
+
+      return new PubSubTransport({
+        config: {
+          projectId,
+          topicName,
+          subscriptionName,
+        },
+        mobileSubscriptionName,
+        userId,
+        logger,
+      });
+    }
+
+    logger.info('[Transport] Using WebSocket relay');
+    return new RelayClient(logger, config);
+  }
+
+  /** Connect to the transport and return a pairing code. */
+  async connectRelay(overrideUrl?: string): Promise<string> {
+    const code = await this.transport.connect(overrideUrl);
     this.updateStatusBar('relay');
     vscode.window.showInformationMessage(
-      `Connected to relay! Room code: ${code}`,
+      `Connected! Pairing code: ${code}`,
       'Copy Code',
     ).then(choice => {
       if (choice === 'Copy Code') {
@@ -192,152 +211,112 @@ export class VsCodeServer extends BaseServer {
     return code;
   }
 
-  /** Disconnect from the cloud relay. */
+  /** Disconnect from the transport. */
   disconnectRelay(): void {
-    this.relay.disconnect();
+    this.transport.disconnect();
     this.relayClientCount = 0;
     this.updateStatusBar(this.server ? 'running' : 'stopped');
-    vscode.window.showInformationMessage('Disconnected from relay.');
+    vscode.window.showInformationMessage('Disconnected from transport.');
   }
 
-  /** Get the current relay room code, or null. */
+  /** Get the current pairing code, or null. */
   getRelayCode(): string | null {
-    return this.relay.code;
+    return this.transport.code;
+  }
+
+  /** Get Pub/Sub pairing info (null for relay transport). */
+  async getPairingInfo(): Promise<any | null> {
+    if (typeof this.transport.getPairingInfo === 'function') {
+      return this.transport.getPairingInfo();
+    }
+    return null;
   }
 
   /**
-   * Wire up relay events:
-   * - Messages from mobile clients via relay → process through RPC
+   * Wire up transport events:
+   * - Messages from mobile → process through RPC
    * - Client join/leave → update status bar
-   * - Disconnect → update status bar
+   * - Disconnect → reset status
    */
-  private setupRelayListeners(): void {
-    this.logger.info('[Relay] Setting up relay listeners');
-    // A mobile client's message arrives via relay — run it through our RPC handler
-    this.disposables.push(this.relay.onMessage.event(async (raw: string) => {
+  private setupTransportListeners(): void {
+    this.transport.onMessage.event((raw: string) => {
+      this.logger.info(`[Transport] Message from mobile: ${raw.substring(0, 200)}`);
+
+      const virtualWs = this.createTransportVirtualWs();
+
+      // Mark as authenticated (transport handles its own auth)
+      this.clients.set(virtualWs, { authenticated: true, sessionId: 'relay' });
+      this.registerSession('relay', virtualWs);
+
+      // Check if this is an auth handshake from the mobile client
       try {
-        this.logger.info(`[Relay] ━━━ Received message from mobile (${raw.length} bytes): ${raw.substring(0, 300)}`);
-
-        // Handle auth directly — bypass virtual WS / RPC for this one message
-        try {
-          const msg = JSON.parse(raw);
-          if (msg.method === 'auth') {
-            // Relay auth: the room code IS the shared secret — if the mobile client
-            // is in this room, it already proved it knows the code. Token-based auth
-            // is for direct WS connections. For relay, accept auth if a token is
-            // provided and valid, OR if the request indicates relay mode.
-            const token = msg.params?.token;
-            if (token) {
-              const valid = await this.auth.validateToken(token);
-              if (!valid) {
-                this.logger.warn(`[Relay] Auth request rejected — invalid token`);
-                const failResponse = JSON.stringify({
-                  id: msg.id || crypto.randomUUID(),
-                  type: 'event',
-                  method: 'auth.failed',
-                  params: { error: 'Invalid token' },
-                });
-                this.relay.send(failResponse);
-                return;
-              }
-              this.logger.info(`[Relay] Auth validated via token`);
-            } else {
-              // No token — relay-mode auth (room code is the auth barrier)
-              this.logger.info(`[Relay] Auth accepted via relay room membership`);
-            }
-
-            // Reuse existing session if the mobile client provided a sessionId (reconnection),
-            // otherwise create a new session (first connect).
-            const existingSessionId = msg.params?.sessionId;
-            let sessionId: string;
-            if (existingSessionId && this.sessions.has(existingSessionId)) {
-              sessionId = existingSessionId;
-              this.logger.info(`[Relay] Reusing existing session: ${sessionId}`);
-            } else {
-              const session = this.auth.createSession();
-              sessionId = session.id;
-              this.logger.info(`[Relay] Created new session: ${sessionId}`);
-            }
-
-            const authResponse = JSON.stringify({
-              id: msg.id || crypto.randomUUID(),
-              type: 'event',
-              method: 'auth.success',
-              params: { sessionId },
-            });
-            this.relay.send(authResponse);
-            this.logger.info(`[Relay] auth.success sent: ${authResponse}`);
-
-            // Set up the virtual WS and session for future messages
-            const virtualWs = this.createRelayVirtualWs();
-            this.clients.set(virtualWs, { authenticated: true, sessionId });
-            this.registerSession(sessionId, virtualWs);
-            this.flushSessionQueue(sessionId);
-            return;
-          }
-        } catch {
-          // Not JSON — fall through
-        }
-
-        // Non-auth messages — require existing authenticated relay session
-        const existingVws = this.getRelayVirtualWs();
-        const clientInfo = existingVws ? this.clients.get(existingVws) : undefined;
-        if (!existingVws || !clientInfo?.authenticated) {
-          this.logger.warn(`[Relay] Dropping non-auth message — no authenticated relay session`);
+        const msg = JSON.parse(raw);
+        if (msg.method === 'auth') {
+          this.logger.info(`[Transport] Auth request received, sending auth.success`);
+          this.rpc.sendEvent(virtualWs, 'auth.success', {
+            sessionId: 'relay',
+          });
           return;
         }
-
-        this.logger.info(`[Relay] Routing non-auth message to RPC handler`);
-        this.rpc.handleMessage(existingVws, raw);
-        this.logger.info(`[Relay] rpc.handleMessage returned`);
-      } catch (outerErr: any) {
-        this.logger.error(`[Relay] FATAL handler error: ${outerErr.message}\n${outerErr.stack}`);
+      } catch {
+        // Not JSON — forward to RPC handler
       }
-    }));
 
-    this.relay.onClientJoined.event(({ clientCount }) => {
+      this.rpc.handleMessage(virtualWs, raw);
+    });
+
+    this.transport.onClientJoined.event(({ clientCount }) => {
       this.relayClientCount = clientCount;
       this.updateStatusBar('relay');
     });
 
-    this.relay.onClientLeft.event(({ clientCount }) => {
+    this.transport.onClientLeft.event(({ clientCount }) => {
       this.relayClientCount = clientCount;
       this.updateStatusBar('relay');
     });
 
-    this.relay.onDisconnected.event(() => {
+    this.transport.onDisconnected.event(() => {
       this.relayClientCount = 0;
-      // Don't update status bar here — reconnection will fire onRoomCreated
     });
   }
 
   /**
-   * Create a virtual WebSocket that sends through the relay instead of a real socket.
-   * This allows the existing RPC handler to work transparently.
+   * Create a virtual WebSocket that sends through the transport.
+   * This allows the existing RPC handler to work transparently with
+   * both sync (Relay) and async (Pub/Sub) send methods.
    */
-  private createRelayVirtualWs(): WebSocket {
-    // We reuse the same virtual WS for all relay messages so session state persists
-    const existing = this.getRelayVirtualWs();
+  private createTransportVirtualWs(): WebSocket {
+    const existing = this.getTransportVirtualWs();
     if (existing) return existing;
 
-    const virtualWs = Object.create(null) as WebSocket;
-    // Mark as relay virtual WS for identification
-    (virtualWs as any).__isRelayVirtual = true;
-    // Override send to route through relay
-    virtualWs.send = ((data: string | Buffer) => {
-      this.relay.send(typeof data === 'string' ? data : data.toString());
-    }) as any;
-    // Dynamic readyState based on relay connection
+    const virtualWs = Object.create(WebSocket.prototype) as WebSocket;
+
+    // Override send to route through the active transport.
+    // Handles both sync (RelayClient) and async (PubSubTransport) sends.
+    (virtualWs as any).send = (data: string | Buffer) => {
+      const payload = typeof data === 'string' ? data : data.toString();
+      const result = this.transport.send(payload);
+      if (result instanceof Promise) {
+        result.catch((err: Error) =>
+          this.logger.error(`[Transport] Send error: ${err.message}`),
+        );
+      }
+    };
+
     Object.defineProperty(virtualWs, 'readyState', {
-      get: () => this.relay.isConnected ? WebSocket.OPEN : WebSocket.CLOSED,
+      get: () => this.transport.isConnected ? WebSocket.OPEN : WebSocket.CLOSED,
       configurable: true,
     });
+
+    // Tag for identification
+    (virtualWs as any).__isTransportVirtual = true;
+
     return virtualWs;
   }
 
-  private getRelayVirtualWs(): WebSocket | null {
-    for (const [ws] of this.clients) {
-      if ((ws as any).__isRelayVirtual) return ws;
+  private getTransportVirtualWs(): WebSocket | null {
+    for (const [ws, info] of this.clients) {
+      if (info.sessionId === 'relay') return ws;
     }
     return null;
   }
@@ -360,12 +339,9 @@ export class VsCodeServer extends BaseServer {
 
     this.rpc.onStream('chat.sendToAgent', async (params, rawSend, ws) => {
       const { prompt } = params as { prompt: string };
-      this.logger.info(`[Agent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-      this.logger.info(`[Agent] Received prompt from mobile: "${prompt?.substring(0, 120)}"`);
-      this.logger.info(`[Agent] WS type: ${typeof ws}, has send: ${typeof (ws as any)?.send}`);
+      this.logger.info(`[Agent] Received prompt from mobile: "${prompt?.substring(0, 80)}"`);
 
       if (!prompt || !prompt.trim()) {
-        this.logger.error('[Agent] Empty prompt received!');
         throw new Error('Prompt is required');
       }
 
@@ -374,18 +350,14 @@ export class VsCodeServer extends BaseServer {
       this.sendToAllSessions('agent.status', { status: 'running', timestamp: Date.now() });
       this.startActivityTracking();
 
-      const allFolders = vscode.workspace.workspaceFolders;
-      this.logger.info(`[Agent] Workspace folders: ${allFolders ? allFolders.map(f => f.uri.fsPath).join(', ') : 'NONE'}`);
-      const wsFolder = allFolders?.[0];
+      const wsFolder = vscode.workspace.workspaceFolders?.[0];
       if (!wsFolder) {
-        this.logger.error('[Agent] No workspace folder open!');
         this.sendToAllSessions('agent.status', { status: 'failed', error: 'No workspace folder open', timestamp: Date.now() });
         throw new Error('No workspace folder open');
       }
-      this.logger.info(`[Agent] Using workspace folder: ${wsFolder.uri.fsPath}`);
 
       try {
-        const captureMode = this.config.get<string>('captureMode', 'hybrid');
+        const captureMode = this.config.get<string>('captureMode', 'relay');
         this.logger.info(`[Agent] Capture mode: ${captureMode}`);
 
         const interceptorSession = this.interceptor.startSession((chunk) => {
@@ -402,22 +374,13 @@ export class VsCodeServer extends BaseServer {
 
         this.markAgentResponseComplete(ws);
 
-        // Send early "completed" so mobile can unblock queue immediately
+        const fileDiffs = await this.computeFileDiffs();
         this.sendToAllSessions('agent.status', {
           status: 'completed',
+          modifiedFiles: Array.from(this.agentModifiedFiles),
+          diffs: fileDiffs,
           timestamp: Date.now(),
         });
-
-        // Then compute diffs (may be slow) and send enriched update
-        const fileDiffs = await this.computeFileDiffs();
-        if (fileDiffs.length > 0 || this.agentModifiedFiles.size > 0) {
-          this.sendToAllSessions('agent.status', {
-            status: 'completed',
-            modifiedFiles: Array.from(this.agentModifiedFiles),
-            diffs: fileDiffs,
-            timestamp: Date.now(),
-          });
-        }
       } catch (err: any) {
         const fileDiffs = await this.computeFileDiffs();
         this.sendToAllSessions('agent.status', {
@@ -550,15 +513,31 @@ export class VsCodeServer extends BaseServer {
 
     this.rpc.onRequest('git.restoreFiles', async (params) => {
       const files = params?.files as string[];
-      return this.agent.gitRestoreFiles(files || []);
-    });
+      if (!files || files.length === 0) {
+        return { restored: 0, message: 'No files specified' };
+      }
+      const wsFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!wsFolder) throw new Error('No workspace folder open');
 
-    // Selectively revert specific diff hunks from a file
-    this.rpc.onRequest('git.revertHunks', async (params) => {
-      const filePath = params?.filePath as string;
-      const hunkIndices = params?.hunkIndices as number[];
-      const fullDiff = params?.diff as string;
-      return this.agent.gitRevertHunks(filePath, hunkIndices, fullDiff);
+      const { execSync } = require('child_process');
+      const results: string[] = [];
+      for (const filePath of files) {
+        try {
+          const status = execSync(`git status --porcelain -- "${filePath}"`, {
+            cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
+          }).trim();
+          if (status.startsWith('??')) {
+            execSync(`rm -f "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+          } else {
+            execSync(`git restore "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+            try { execSync(`git restore --staged "${filePath}"`, { cwd: wsFolder.uri.fsPath }); } catch { /* ignore */ }
+          }
+          results.push(filePath);
+        } catch (err: any) {
+          this.logger.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
+        }
+      }
+      return { restored: results.length, files: results };
     });
 
     this.rpc.onRequest('git.restoreChanges', async (params) => {
@@ -567,10 +546,27 @@ export class VsCodeServer extends BaseServer {
         ? files
         : Array.from(this.agentModifiedFiles);
 
-      const result = await this.agent.gitRestoreChanges(filesToRestore);
+      if (filesToRestore.length === 0) {
+        return { restored: 0, message: 'No modified files to restore' };
+      }
+
+      const wsFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!wsFolder) throw new Error('No workspace folder open');
+
+      const results: string[] = [];
+      for (const filePath of filesToRestore) {
+        try {
+          const { execSync } = require('child_process');
+          execSync(`git restore "${filePath}"`, { cwd: wsFolder.uri.fsPath });
+          results.push(filePath);
+        } catch (err: any) {
+          this.logger.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
+        }
+      }
+
       this.agentModifiedFiles.clear();
-      this.logger.info(`[Git] Restored ${result.restored} files`);
-      return result;
+      this.logger.info(`[Git] Restored ${results.length} files`);
+      return { restored: results.length, files: results };
     });
 
     this.rpc.onRequest('agent.modifiedFiles', async () => {
@@ -590,52 +586,43 @@ export class VsCodeServer extends BaseServer {
 
   // ─── Capture Strategies ─────────────────────────────────────────
 
-  /**
-   * Find the last "safe" break point — delegates to the exported `findSafeBreak`.
-   */
-  private findSafeBreak(text: string): number {
-    return findSafeBreak(text);
-  }
-
   private async runRelayCapture(
     prompt: string,
     wsFolder: vscode.WorkspaceFolder,
     send: (chunk: string) => void,
     hybridInterceptorSession: { wait: () => Promise<any> } | null,
   ): Promise<void> {
-    this.logger.info(`[Relay] ━━━ runRelayCapture START ━━━`);
-    this.logger.info(`[Relay] Workspace folder: ${wsFolder.uri.fsPath}`);
-    this.logger.info(`[Relay] Prompt length: ${prompt.length}`);
     const RELAY_FILENAME = '.copilot-mobile-relay.md';
     const relayUri = vscode.Uri.joinPath(wsFolder.uri, RELAY_FILENAME);
-    this.logger.info(`[Relay] Relay file URI: ${relayUri.toString()}`);
-    this.logger.info(`[Relay] Relay file fsPath: ${relayUri.fsPath}`);
     const DONE_MARKER = '<!-- MOBILE_DONE -->';
-    const TIMEOUT_MS = 600_000; // 10 minutes — agent tasks with tool calls can be very long
-    const POLL_INTERVAL_MS = 2_000;
+    const TIMEOUT_MS = 180_000;
+    const DEBOUNCE_MS = 4_000;
 
     try {
       await vscode.workspace.fs.delete(relayUri);
-      this.logger.info('[Relay] Deleted existing relay file');
-    } catch {
-      this.logger.info('[Relay] No existing relay file to delete (OK)');
-    }
+    } catch { /* ignore */ }
 
-    // The relay file instruction is handled by .github/copilot-instructions.md
-    // (injected as system context by VS Code). No prompt augmentation needed.
+    const augmentedPrompt =
+      prompt + '\n\n' +
+      '--- IMPORTANT INSTRUCTION ---\n' +
+      `After your response, also write your COMPLETE chat response (what you just said above) ` +
+      `as markdown into the workspace file \`${RELAY_FILENAME}\`. ` +
+      `This is to relay your answer to a mobile client that cannot see the chat panel. ` +
+      `End the file content with exactly this marker on its own line: ${DONE_MARKER}\n` +
+      'Copy your full response including explanations, code blocks, and formatting. ' +
+      'Do NOT skip this step.';
 
-    let sentLength = 0;
     let lastContent = '';
+    let sentLength = 0;
     let hasReceivedContent = false;
 
     const relayPromise = new Promise<string>((resolve, reject) => {
+      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
       let resolved = false;
 
-      // ── Absolute timeout — safety net ──
       const timeoutTimer = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          clearInterval(pollTimer);
           watcher.dispose();
           if (lastContent.length > 0) {
             resolve(lastContent);
@@ -648,137 +635,76 @@ export class VsCodeServer extends BaseServer {
         }
       }, TIMEOUT_MS);
 
-      // ── Core: read file, find safe break, stream only complete thoughts ──
+      const pattern = new vscode.RelativePattern(wsFolder, RELAY_FILENAME);
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+
       const checkFile = async () => {
         if (resolved) return;
         try {
           const bytes = await vscode.workspace.fs.readFile(relayUri);
-          const content = Buffer.from(bytes).toString('utf8').trimEnd();
+          const content = Buffer.from(bytes).toString('utf8').trim();
 
           if (content.length === 0) return;
-          this.logger.info(`[Relay] Poll: file ${content.length} chars, sent ${sentLength}`);
 
-          // Check for DONE marker → flush everything
-          if (content.includes(DONE_MARKER)) {
-            const finalText = content.replace(DONE_MARKER, '').trimEnd();
-            if (finalText.length > sentLength) {
-              send(finalText.substring(sentLength));
+          if (content.length > sentLength) {
+            let newContent = content.substring(sentLength);
+            const cleanContent = newContent.replace(DONE_MARKER, '').trimEnd();
+            if (cleanContent.length > 0) {
+              hasReceivedContent = true;
+              send(cleanContent);
             }
-            lastContent = finalText;
+            sentLength = content.length;
+            lastContent = content.replace(DONE_MARKER, '').trimEnd();
+          }
+
+          if (content.includes(DONE_MARKER)) {
             resolved = true;
             clearTimeout(timeoutTimer);
-            clearInterval(pollTimer);
+            if (debounceTimer) clearTimeout(debounceTimer);
             watcher.dispose();
             resolve(lastContent);
             return;
           }
 
-          // New content available?
-          if (content.length <= sentLength) {
-            return;
-          }
+          if (hasReceivedContent) {
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(async () => {
+              if (!resolved) {
+                try {
+                  const finalBytes = await vscode.workspace.fs.readFile(relayUri);
+                  const finalContent = Buffer.from(finalBytes).toString('utf8');
+                  if (finalContent.length > sentLength) {
+                    const remaining = finalContent.substring(sentLength).replace(DONE_MARKER, '').trimEnd();
+                    if (remaining.length > 0) send(remaining);
+                    lastContent = finalContent.replace(DONE_MARKER, '').trimEnd();
+                  }
+                } catch { /* ignore */ }
 
-          hasReceivedContent = true;
-
-          // Only send up to the last safe break (complete sentence/paragraph)
-          const newContent = content.substring(sentLength);
-          const safeIdx = this.findSafeBreak(newContent);
-
-          if (safeIdx > 0) {
-            const safeChunk = newContent.substring(0, safeIdx);
-            send(safeChunk);
-            sentLength += safeIdx;
-            lastContent = content.substring(0, sentLength);
-            this.logger.info(`[Relay] Streamed ${safeChunk.length} chars (safe break). Total sent: ${sentLength}`);
-          } else {
-            this.logger.info(`[Relay] No safe break in ${newContent.length} new chars — holding`);
+                resolved = true;
+                clearTimeout(timeoutTimer);
+                watcher.dispose();
+                resolve(lastContent);
+              }
+            }, DEBOUNCE_MS);
           }
         } catch (err: any) {
           this.logger.warn(`[Relay] Error reading file: ${err.message}`);
         }
       };
 
-      // ── File watcher — react to file changes but throttle via the poll timer ──
-      const pattern = new vscode.RelativePattern(wsFolder, RELAY_FILENAME);
-      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
-
-      // Trigger an immediate check when the file first appears or changes
-      let lastWatcherCheck = 0;
-      const throttledCheck = () => {
-        const now = Date.now();
-        // Don't check more often than every 2 seconds from watcher events
-        if (now - lastWatcherCheck < 2_000) return;
-        lastWatcherCheck = now;
-        checkFile();
-      };
-      watcher.onDidChange(throttledCheck);
-      watcher.onDidCreate(throttledCheck);
-
-      // ── Also listen for in-editor document changes (tool-based writes) ──
-      const docChangeListener = vscode.workspace.onDidChangeTextDocument((e) => {
-        if (resolved) return;
-        const docPath = e.document.uri.fsPath;
-        if (docPath === relayUri.fsPath && e.contentChanges.length > 0) {
-          throttledCheck();
-        }
-      });
-
-      // ── Also listen for document open (create_file opens the doc) ──
-      const docOpenListener = vscode.workspace.onDidOpenTextDocument((doc) => {
-        if (resolved) return;
-        if (doc.uri.fsPath === relayUri.fsPath) {
-          setTimeout(checkFile, 500); // slight delay for content to be written
-        }
-      });
-
-      // ── Poll every POLL_INTERVAL_MS as the primary streaming mechanism ──
-      const pollTimer = setInterval(checkFile, POLL_INTERVAL_MS);
-
-      // Clean up all listeners on resolution
-      const originalResolve = resolve;
-      resolve = (val: string) => {
-        docChangeListener.dispose();
-        docOpenListener.dispose();
-        originalResolve(val);
-      };
-      const originalReject = reject;
-      reject = (err: Error) => {
-        docChangeListener.dispose();
-        docOpenListener.dispose();
-        originalReject(err);
-      };
+      watcher.onDidChange(checkFile);
+      watcher.onDidCreate(checkFile);
     });
 
     send('⏳ *Waiting for Copilot agent response on desktop...*\n\n');
 
-    const relayInstruction = [
-      '',
-      '---',
-      'IMPORTANT: Write your EXACT verbatim response into the workspace file `.copilot-mobile-relay.md`.',
-      'Write to the relay file as you go — after each logical step, update the file with everything so far.',
-      'When completely finished, add `<!-- MOBILE_DONE -->` on its own final line.',
-      'Overwrite the file each time (not append).',
-    ].join('\n');
-
-    const mobilePrompt = `[📱 Mobile] ${prompt}\n${relayInstruction}`;
-    this.logger.info(`[Relay] ━━━ Executing workbench.action.chat.open ━━━`);
-    this.logger.info(`[Relay] Prompt (first 200 chars): ${prompt.substring(0, 200)}`);
-    
     vscode.commands.executeCommand('workbench.action.chat.open', {
-      query: mobilePrompt,
+      query: augmentedPrompt,
       isPartialQuery: false,
     }).then(
-      () => this.logger.info('[Relay] ✓ Chat panel command executed SUCCESSFULLY'),
-      (err: any) => this.logger.error(`[Relay] ✗ Failed to open Chat panel: ${err.message}`)
+      () => this.logger.info('[Relay] Chat panel command executed'),
+      (err: any) => this.logger.error(`[Relay] Failed to open Chat panel: ${err.message}`)
     );
-
-    // Log available chat commands only when debug logging is enabled
-    if (process.env.MCR_DEBUG === '1') {
-      vscode.commands.getCommands(true).then(cmds => {
-        const chatCmds = cmds.filter(c => c.includes('chat'));
-        this.logger.info(`[Relay] Available chat commands: ${chatCmds.join(', ')}`);
-      });
-    }
 
     try {
       const fullText = await relayPromise;
@@ -826,9 +752,8 @@ export class VsCodeServer extends BaseServer {
   ): Promise<void> {
     send('⏳ *Sending to Copilot agent...*\n\n');
 
-    const mobilePrompt = `[📱 Mobile] ${prompt}`;
     vscode.commands.executeCommand('workbench.action.chat.open', {
-      query: mobilePrompt,
+      query: prompt,
       isPartialQuery: false,
     }).then(
       () => this.logger.info('[Interceptor] Chat panel command executed'),
@@ -1027,21 +952,20 @@ export class VsCodeServer extends BaseServer {
     if (!wsFolder) return [];
 
     const results: Array<{ path: string; diff: string }> = [];
-    const { execFileSync } = require('child_process');
-    const fs = require('fs');
+    const { execSync } = require('child_process');
 
     for (const filePath of files) {
       try {
         let diff = '';
         try {
-          diff = execFileSync('git', ['diff', '--no-color', '--', filePath], {
+          diff = execSync(`git diff --no-color -- "${filePath}"`, {
             cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
           }).trim();
         } catch { /* ignore */ }
 
         if (!diff) {
           try {
-            diff = execFileSync('git', ['diff', '--cached', '--no-color', '--', filePath], {
+            diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
             }).trim();
           } catch { /* ignore */ }
@@ -1049,13 +973,13 @@ export class VsCodeServer extends BaseServer {
 
         if (!diff) {
           try {
-            const status = execFileSync('git', ['status', '--porcelain', '--', filePath], {
+            const status = execSync(`git status --porcelain -- "${filePath}"`, {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
             }).trim();
             if (status.startsWith('??') || status.startsWith('A ')) {
-              const nodePath = require('path');
-              const absPath = nodePath.resolve(wsFolder.uri.fsPath, filePath);
-              const content = fs.readFileSync(absPath, 'utf-8');
+              const content = execSync(`cat "${filePath}"`, {
+                cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
+              });
               const lines = content.split('\n');
               diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n` +
                 lines.map((l: string) => '+' + l).join('\n');
@@ -1084,10 +1008,10 @@ export class VsCodeServer extends BaseServer {
     const wsFolder = vscode.workspace.workspaceFolders?.[0];
     if (!wsFolder) return { files: [], summary: { modified: 0, added: 0, deleted: 0, totalAdded: 0, totalRemoved: 0 } };
 
-    const { execFileSync } = require('child_process');
+    const { execSync } = require('child_process');
     let statusOutput = '';
     try {
-      statusOutput = execFileSync('git', ['status', '--porcelain'], {
+      statusOutput = execSync('git status --porcelain', {
         cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
       }).trim();
     } catch {
@@ -1116,35 +1040,35 @@ export class VsCodeServer extends BaseServer {
       try {
         if (status === 'added') {
           try {
-            const nodePath = require('path');
-            const absPath = nodePath.resolve(wsFolder.uri.fsPath, filePath);
-            const content = require('fs').readFileSync(absPath, 'utf-8');
-            const contentLines = content.split('\n');
-            diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${contentLines.length} @@\n` +
-              contentLines.map((l: string) => '+' + l).join('\n');
+            const content = execSync(`cat "${filePath}"`, {
+              cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
+            });
+            const lines = content.split('\n');
+            diff = `--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n` +
+              lines.map((l: string) => '+' + l).join('\n');
           } catch { /* ignore */ }
         } else if (status === 'deleted') {
           try {
-            diff = execFileSync('git', ['diff', '--no-color', '--', filePath], {
+            diff = execSync(`git diff --no-color -- "${filePath}"`, {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
             }).trim();
           } catch { /* ignore */ }
           if (!diff) {
             try {
-              diff = execFileSync('git', ['diff', '--cached', '--no-color', '--', filePath], {
+              diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
                 cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
               }).trim();
             } catch { /* ignore */ }
           }
         } else {
           try {
-            diff = execFileSync('git', ['diff', '--no-color', '--', filePath], {
+            diff = execSync(`git diff --no-color -- "${filePath}"`, {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
             }).trim();
           } catch { /* ignore */ }
           if (!diff) {
             try {
-              diff = execFileSync('git', ['diff', '--cached', '--no-color', '--', filePath], {
+              diff = execSync(`git diff --cached --no-color -- "${filePath}"`, {
                 cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
               }).trim();
             } catch { /* ignore */ }
@@ -1178,28 +1102,33 @@ export class VsCodeServer extends BaseServer {
       case 'stopped':
         this.statusBarItem.text = '$(device-mobile) Mobile: Off';
         this.statusBarItem.tooltip = 'Click to start Mobile Copilot';
+        this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = undefined;
         break;
       case 'running':
         this.statusBarItem.text = '$(broadcast) Mobile: LAN';
         this.statusBarItem.tooltip = `Mobile Copilot on port ${this.port}\nClick to show QR code`;
+        this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = undefined;
         break;
       case 'connected':
         this.statusBarItem.text = `$(broadcast) Mobile: ${this.clients.size} connected`;
         this.statusBarItem.tooltip = `${this.clients.size} device(s) connected\nClick to show QR code`;
+        this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.prominentBackground');
         break;
       case 'tunnel':
         this.statusBarItem.text = '$(globe) Mobile: Tunnel';
         this.statusBarItem.tooltip = `Tunnel active: ${this.tunnel.getTunnelUrl()}\nClick to show QR code`;
+        this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         break;
       case 'relay':
-        const code = this.relay.code || '...';
+        const code = this.transport.code || '...';
         const count = this.relayClientCount;
         this.statusBarItem.text = `$(cloud) Mobile: Relay [${code}]`;
-        this.statusBarItem.tooltip = `Cloud relay room: ${code}\n${count} device(s) connected`;
+        this.statusBarItem.tooltip = `Pairing code: ${code}\n${count} device(s) connected\nClick for options`;
+        this.statusBarItem.command = 'mobile-copilot.relayMenu';
         this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.prominentBackground');
         break;
     }
@@ -1210,7 +1139,7 @@ export class VsCodeServer extends BaseServer {
 
   dispose(): void {
     this.stop();
-    this.relay.dispose();
+    this.transport.dispose();
     this.interceptor.dispose();
     this.agent.dispose();
     this.tunnel.dispose();

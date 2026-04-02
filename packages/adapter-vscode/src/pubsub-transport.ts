@@ -1,305 +1,475 @@
 /**
- * Google Cloud Pub/Sub transport for Mobile Copilot.
+ * Google Cloud Pub/Sub transport for Mobile Copilot (extension side).
  *
- * Replaces WebSocket relay with Pub/Sub for reliable message delivery.
- * Extension publishes responses and subscribes to incoming prompts.
+ * Drop-in replacement for RelayClient — exposes the same event interface
+ * (`onMessage`, `onRoomCreated`, `onDisconnected`, `onClientJoined`,
+ * `onClientLeft`) so `server.ts` can consume it without changes.
+ *
+ * ## Architecture
+ *
+ * ```
+ * Mobile App ──publish──▶ Topic ──ext-{userId} sub──▶ PubSubTransport.pull()
+ * PubSubTransport.send() ──publish──▶ Topic ──mobile-{userId} sub──▶ Mobile App
+ * ```
+ *
+ * ## Authentication
+ *
+ * Supports two credential sources (in priority order):
+ * 1. Service account JSON key file (for CI / headless environments)
+ * 2. Application Default Credentials via `gcloud auth print-access-token`
+ *
+ * ## Message Format
+ *
+ * All messages use `PubSubEnvelope` from `@mobile-copilot/protocol`.
+ * RPC messages are JSON-encoded inside the envelope's `payload` field.
+ *
+ * @module PubSubTransport
  */
 
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
+import type { ILogger } from '@mobile-copilot/adapter-core';
+import type {
+  PubSubEnvelope,
+  PubSubConfig,
+  PubSubPairingInfo,
+} from '@mobile-copilot/protocol';
+import {
+  PUBSUB_API_BASE_URL,
+  PUBSUB_POLL_INTERVAL_MS,
+  PUBSUB_MAX_MESSAGES_PER_PULL,
+  PUBSUB_HEALTH_CHECK_INTERVAL_MS,
+} from '@mobile-copilot/protocol';
 
-// ─── Types ──────────────────────────────────────────────
+// ─── HTTP Client (injectable for testing) ───────────────
 
-export interface PubSubMessage {
-  id: string;
-  correlationId?: string;
-  userId: string;
-  direction: 'mobile_to_ext' | 'ext_to_mobile';
-  messageType:
-    | 'prompt'
-    | 'agent_prompt'
-    | 'cancel'
-    | 'auth'
-    | 'request'
-    | 'stream_chunk'
-    | 'stream_end'
-    | 'event'
-    | 'response'
-    | 'error';
-  method?: string;
-  payload?: string; // JSON-encoded
-  timestamp: number;
+/**
+ * Minimal HTTP interface for Pub/Sub REST calls.
+ * Injectable for deterministic testing without network I/O.
+ */
+export interface PubSubHttpClient {
+  post(url: string, body: unknown, token: string): Promise<PubSubHttpResponse>;
 }
 
-export interface PubSubConfig {
-  projectId: string;
-  topicName: string;
-  /** Subscription for messages FROM mobile (direction=mobile_to_ext) */
-  extensionSubscription: string;
+export interface PubSubHttpResponse {
+  ok: boolean;
+  status: number;
+  json(): Promise<any>;
+  text(): Promise<string>;
 }
 
-type MessageCallback = (msg: PubSubMessage) => void;
-
-// ─── Pub/Sub Transport ──────────────────────────────────
-
-export class PubSubTransport {
-  private projectId: string;
-  private topicPath: string;
-  private subscriptionPath: string;
-  private accessToken: string | null = null;
-  private tokenExpiry = 0;
-  private keyFileData: any = null;
-  private logger: vscode.LogOutputChannel;
-  private onMessage: MessageCallback = () => {};
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private isPolling = false;
-  private disposed = false;
-  private userId: string;
-
-  private static readonly BASE_URL = 'https://pubsub.googleapis.com/v1';
-  private static readonly POLL_INTERVAL_MS = 2_000;
-  private static readonly MAX_MESSAGES_PER_PULL = 10;
-
-  constructor(config: PubSubConfig, userId: string, logger: vscode.LogOutputChannel) {
-    this.projectId = config.projectId;
-    this.topicPath = `projects/${config.projectId}/topics/${config.topicName}`;
-    this.subscriptionPath = `projects/${config.projectId}/subscriptions/${config.extensionSubscription}`;
-    this.userId = userId;
-    this.logger = logger;
-  }
-
-  // ─── Auth ──────────────────────────────────────────────
-
-  /**
-   * Get an access token using service account JWT or Application Default Credentials.
-   */
-  private async getAccessToken(): Promise<string> {
-    // Return cached token if still valid
-    if (this.accessToken && Date.now() < this.tokenExpiry - 60_000) {
-      return this.accessToken;
-    }
-
-    if (this.keyFileData) {
-      this.accessToken = await this.getTokenFromServiceAccount();
-    } else {
-      this.accessToken = await this.getTokenFromADC();
-    }
-
-    this.tokenExpiry = Date.now() + 3600_000; // 1 hour
-    return this.accessToken;
-  }
-
-  /**
-   * Create a self-signed JWT for service account auth.
-   * Google Pub/Sub accepts self-signed JWTs directly — no token exchange needed.
-   */
-  private async getTokenFromServiceAccount(): Promise<string> {
-    const crypto = require('crypto');
-    const sa = this.keyFileData;
-
-    const now = Math.floor(Date.now() / 1000);
-    const header = { alg: 'RS256', typ: 'JWT', kid: sa.private_key_id };
-    const payload = {
-      iss: sa.client_email,
-      sub: sa.client_email,
-      aud: 'https://pubsub.googleapis.com/',
-      iat: now,
-      exp: now + 3600,
-    };
-
-    const b64 = (obj: any) =>
-      Buffer.from(JSON.stringify(obj)).toString('base64url');
-
-    const unsigned = `${b64(header)}.${b64(payload)}`;
-    const sign = crypto.createSign('RSA-SHA256');
-    sign.update(unsigned);
-    const signature = sign.sign(sa.private_key, 'base64url');
-
-    const jwt = `${unsigned}.${signature}`;
-    this.logger.info('[PubSub] Generated service account JWT');
-    return jwt;
-  }
-
-  /**
-   * Get token from Application Default Credentials (gcloud CLI).
-   */
-  private async getTokenFromADC(): Promise<string> {
-    const { execFileSync } = require('child_process');
-    // Try 'gcloud' on PATH first, then common install locations
-    const gcloudPaths = [
-      'gcloud',
-      '/tmp/google-cloud-sdk/bin/gcloud',
-      '/usr/local/bin/gcloud',
-      '/usr/bin/gcloud',
-      `${process.env.HOME}/google-cloud-sdk/bin/gcloud`,
-    ];
-    for (const gcloudBin of gcloudPaths) {
-      try {
-        const token = execFileSync(gcloudBin, ['auth', 'print-access-token'], {
-          encoding: 'utf-8',
-          timeout: 10_000,
-        }).trim();
-        this.logger.info(`[PubSub] Got token from gcloud CLI (${gcloudBin})`);
-        return token;
-      } catch {
-        // Try next path
-      }
-    }
-    this.logger.error('[PubSub] Failed to get token from gcloud CLI — tried all known paths');
-    throw new Error(
-      'No Pub/Sub credentials. Install gcloud CLI and run "gcloud auth login".',
-    );
-  }
-
-  // ─── HTTP Helpers ──────────────────────────────────────
-
-  private async pubsubFetch(url: string, body?: any): Promise<any> {
-    const token = await this.getAccessToken();
+/**
+ * Default HTTP client using the global `fetch` API.
+ */
+export class FetchHttpClient implements PubSubHttpClient {
+  async post(url: string, body: unknown, token: string): Promise<PubSubHttpResponse> {
     const resp = await fetch(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: body ? JSON.stringify(body) : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
+    return resp;
+  }
+}
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`Pub/Sub API error ${resp.status}: ${text}`);
+// ─── Token Provider (injectable for testing) ─────────────
+
+/**
+ * Provides access tokens for Pub/Sub API authentication.
+ * Injectable for testing without real credentials.
+ */
+export interface TokenProvider {
+  getToken(): Promise<string>;
+}
+
+/**
+ * Gets tokens from `gcloud auth print-access-token` (ADC).
+ */
+export class AdcTokenProvider implements TokenProvider {
+  private cachedToken: string | null = null;
+  private tokenExpiry = 0;
+
+  async getToken(): Promise<string> {
+    if (this.cachedToken && Date.now() < this.tokenExpiry - 60_000) {
+      return this.cachedToken;
     }
 
-    return resp.json();
+    const { execFileSync } = require('child_process');
+    const gcloudPaths = [
+      'gcloud',
+      '/usr/local/bin/gcloud',
+      '/usr/bin/gcloud',
+      `${process.env.HOME}/google-cloud-sdk/bin/gcloud`,
+    ];
+
+    for (const bin of gcloudPaths) {
+      try {
+        const token = execFileSync(bin, ['auth', 'print-access-token'], {
+          encoding: 'utf-8',
+          timeout: 10_000,
+        }).trim();
+        this.cachedToken = token;
+        this.tokenExpiry = Date.now() + 3_600_000;
+        return token;
+      } catch {
+        continue;
+      }
+    }
+
+    throw new Error(
+      'No Pub/Sub credentials found. Run `gcloud auth application-default login`.',
+    );
   }
+}
 
-  // ─── Publish ──────────────────────────────────────────
+/**
+ * Uses a service account key file for JWT-based auth.
+ */
+export class ServiceAccountTokenProvider implements TokenProvider {
+  private cachedToken: string | null = null;
+  private tokenExpiry = 0;
 
-  /**
-   * Publish a message to the topic (extension → mobile).
-   */
-  async publish(msg: Omit<PubSubMessage, 'id' | 'userId' | 'direction' | 'timestamp'>): Promise<void> {
-    const fullMsg: PubSubMessage = {
-      id: require('crypto').randomUUID(),
-      userId: this.userId,
-      direction: 'ext_to_mobile',
-      timestamp: Date.now(),
-      ...msg,
+  constructor(private readonly keyFileData: {
+    private_key_id: string;
+    private_key: string;
+    client_email: string;
+  }) {}
+
+  async getToken(): Promise<string> {
+    if (this.cachedToken && Date.now() < this.tokenExpiry - 60_000) {
+      return this.cachedToken;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const header = { alg: 'RS256', typ: 'JWT', kid: this.keyFileData.private_key_id };
+    const payload = {
+      iss: this.keyFileData.client_email,
+      sub: this.keyFileData.client_email,
+      aud: 'https://pubsub.googleapis.com/',
+      iat: now,
+      exp: now + 3600,
     };
 
-    const data = Buffer.from(JSON.stringify(fullMsg)).toString('base64');
+    const b64 = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+    const unsigned = `${b64(header)}.${b64(payload)}`;
+    const sign = crypto.createSign('RSA-SHA256');
+    sign.update(unsigned);
+    const signature = sign.sign(this.keyFileData.private_key, 'base64url');
+
+    this.cachedToken = `${unsigned}.${signature}`;
+    this.tokenExpiry = Date.now() + 3_600_000;
+    return this.cachedToken;
+  }
+}
+
+// ─── PubSubTransport Options ─────────────────────────────
+
+export interface PubSubTransportOptions {
+  /** Pub/Sub configuration (project, topic, subscription). */
+  config: PubSubConfig;
+
+  /** Subscription name for the mobile app to pull from (ext → mobile messages). */
+  mobileSubscriptionName?: string;
+
+  /** Unique user/session ID for message routing. */
+  userId: string;
+  userId: string;
+
+  /** Logger instance. */
+  logger: ILogger;
+
+  /** HTTP client (defaults to FetchHttpClient). */
+  httpClient?: PubSubHttpClient;
+
+  /** Token provider (defaults to AdcTokenProvider). */
+  tokenProvider?: TokenProvider;
+
+  /** Poll interval in ms (defaults to PUBSUB_POLL_INTERVAL_MS). */
+  pollIntervalMs?: number;
+
+  /** Max messages per pull (defaults to PUBSUB_MAX_MESSAGES_PER_PULL). */
+  maxMessagesPerPull?: number;
+}
+
+// ─── PubSubTransport ─────────────────────────────────────
+
+/**
+ * Pub/Sub transport that implements the same event interface as `RelayClient`.
+ *
+ * ## Drop-in Compatibility
+ *
+ * This class exposes the same public API as `RelayClient`:
+ * - `connect()` → starts polling, fires `onRoomCreated`
+ * - `send(data)` → publishes an RPC message envelope
+ * - `disconnect()` → stops polling, fires `onDisconnected`
+ * - `isConnected` / `code` getters
+ * - `onMessage`, `onRoomCreated`, `onDisconnected`, `onClientJoined`, `onClientLeft` events
+ *
+ * `server.ts` can switch between `RelayClient` and `PubSubTransport`
+ * by changing a single constructor call.
+ */
+export class PubSubTransport {
+  // ─── Event emitters (same shape as RelayClient) ────────
+
+  /** Fires when connected and ready. Payload includes a synthetic pairing code. */
+  readonly onRoomCreated = new vscode.EventEmitter<{ code: string }>();
+
+  /** Fires when transport disconnects (poll stopped or health check failed). */
+  readonly onDisconnected = new vscode.EventEmitter<void>();
+
+  /** Fires when an RPC message arrives from mobile. Payload is raw JSON string. */
+  readonly onMessage = new vscode.EventEmitter<string>();
+
+  /** Fires when a mobile client connects (pairing message received). */
+  readonly onClientJoined = new vscode.EventEmitter<{ clientCount: number }>();
+
+  /** Fires when a mobile client disconnects. */
+  readonly onClientLeft = new vscode.EventEmitter<{ clientCount: number }>();
+
+  // ─── Internal state ────────────────────────────────────
+
+  private readonly config: PubSubConfig;
+  private readonly mobileSubscriptionName: string;
+  private readonly userId: string;
+  private readonly logger: ILogger;
+  private readonly http: PubSubHttpClient;
+  private readonly tokenProvider: TokenProvider;
+  private readonly pollIntervalMs: number;
+  private readonly maxMessagesPerPull: number;
+
+  private readonly topicPath: string;
+  private readonly subscriptionPath: string;
+
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
+  private isPolling = false;
+  private disposed = false;
+  private connected = false;
+  private clientCount = 0;
+  private pairingCode: string | null = null;
+
+  /** Set of message IDs already processed — prevents redelivery duplicates. */
+  private readonly processedIds = new Set<string>();
+  private static readonly MAX_PROCESSED_IDS = 1000;
+
+  constructor(options: PubSubTransportOptions) {
+    this.config = options.config;
+    this.mobileSubscriptionName = options.mobileSubscriptionName || `mobile-${options.userId}`;
+    this.userId = options.userId;
+    this.logger = options.logger;
+    this.http = options.httpClient ?? new FetchHttpClient();
+    this.tokenProvider = options.tokenProvider ?? new AdcTokenProvider();
+    this.pollIntervalMs = options.pollIntervalMs ?? PUBSUB_POLL_INTERVAL_MS;
+    this.maxMessagesPerPull = options.maxMessagesPerPull ?? PUBSUB_MAX_MESSAGES_PER_PULL;
+
+    this.topicPath = `projects/${this.config.projectId}/topics/${this.config.topicName}`;
+    this.subscriptionPath = `projects/${this.config.projectId}/subscriptions/${this.config.subscriptionName}`;
+  }
+
+  // ─── Public API (RelayClient-compatible) ───────────────
+
+  /** Whether the transport is actively connected and polling. */
+  get isConnected(): boolean {
+    return this.connected && !this.disposed;
+  }
+
+  /** The pairing code (analogous to relay room code). */
+  get code(): string | null {
+    return this.pairingCode;
+  }
+
+  /**
+   * Connect to Pub/Sub: validate credentials, start polling.
+   * Returns a pairing code that mobile clients use to connect.
+   *
+   * @returns The pairing code (derived from userId).
+   * @throws If credentials are invalid or Pub/Sub API is unreachable.
+   */
+  async connect(): Promise<string> {
+    if (this.connected && this.pairingCode) {
+      return this.pairingCode;
+    }
+
+    this.disposed = false;
+
+    // Validate credentials with a test pull
+    this.logger.info('[PubSub] Validating credentials...');
+    const token = await this.tokenProvider.getToken();
+    const testResp = await this.http.post(
+      `${PUBSUB_API_BASE_URL}/${this.subscriptionPath}:pull`,
+      { maxMessages: 1 },
+      token,
+    );
+
+    if (!testResp.ok) {
+      const errText = await testResp.text();
+      throw new Error(`Pub/Sub credential validation failed (${testResp.status}): ${errText}`);
+    }
+
+    // Generate pairing code from userId (deterministic so reconnects get same code)
+    this.pairingCode = this.userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase()
+      || crypto.randomBytes(3).toString('hex').toUpperCase();
+
+    this.connected = true;
+
+    // Start polling for incoming messages
+    this.startPolling();
+
+    // Start health checks
+    this.startHealthChecks();
+
+    this.logger.info(`[PubSub] Connected. Pairing code: ${this.pairingCode}`);
+    this.onRoomCreated.fire({ code: this.pairingCode });
+
+    return this.pairingCode;
+  }
+
+  /**
+   * Send a raw RPC message string to the mobile client.
+   * Wraps the message in a PubSubEnvelope and publishes to the topic.
+   *
+   * @param data - JSON string of an RpcMessage.
+   */
+  async send(data: string): Promise<void> {
+    if (!this.connected || this.disposed) {
+      this.logger.info('[PubSub] Cannot send — not connected');
+      return;
+    }
+
+    const envelope: PubSubEnvelope = {
+      id: crypto.randomUUID(),
+      userId: this.userId,
+      direction: 'ext_to_mobile',
+      messageType: 'rpc',
+      payload: data,
+      timestamp: Date.now(),
+    };
+
+    const base64Data = Buffer.from(JSON.stringify(envelope)).toString('base64');
 
     try {
-      await this.pubsubFetch(`${PubSubTransport.BASE_URL}/${this.topicPath}:publish`, {
-        messages: [
-          {
-            data,
+      const token = await this.tokenProvider.getToken();
+      const resp = await this.http.post(
+        `${PUBSUB_API_BASE_URL}/${this.topicPath}:publish`,
+        {
+          messages: [{
+            data: base64Data,
             attributes: {
               direction: 'ext_to_mobile',
               userId: this.userId,
-              messageType: fullMsg.messageType,
+              messageType: 'rpc',
             },
             orderingKey: this.userId,
-          },
-        ],
-      });
-      this.logger.info(`[PubSub] Published ${fullMsg.messageType} (${data.length} bytes)`);
+          }],
+        },
+        token,
+      );
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        this.logger.error(`[PubSub] Publish failed (${resp.status}): ${errText}`);
+      } else {
+        this.logger.info(`[PubSub] Published (${data.length} bytes payload)`);
+      }
     } catch (err: any) {
-      this.logger.error(`[PubSub] Publish failed: ${err.message}`);
-      throw err;
+      this.logger.error(`[PubSub] Publish error: ${err.message}`);
     }
   }
 
   /**
-   * Convenience: publish a stream chunk.
+   * Disconnect from Pub/Sub: stop polling, clean up timers.
    */
-  async publishChunk(chunk: string, correlationId?: string): Promise<void> {
-    await this.publish({
-      messageType: 'stream_chunk',
-      correlationId,
-      payload: JSON.stringify({ chunk }),
-    });
+  disconnect(): void {
+    this.stopPolling();
+    this.stopHealthChecks();
+    this.connected = false;
+    this.pairingCode = null;
+    this.clientCount = 0;
+    this.processedIds.clear();
+    this.onDisconnected.fire();
+    this.logger.info('[PubSub] Disconnected');
   }
 
   /**
-   * Convenience: publish stream end.
+   * Dispose all resources. Called on extension deactivation.
    */
-  async publishStreamEnd(content: string, correlationId?: string): Promise<void> {
-    await this.publish({
-      messageType: 'stream_end',
-      correlationId,
-      payload: JSON.stringify({ content }),
-    });
+  dispose(): void {
+    this.disposed = true;
+    this.disconnect();
+    this.onRoomCreated.dispose();
+    this.onDisconnected.dispose();
+    this.onMessage.dispose();
+    this.onClientJoined.dispose();
+    this.onClientLeft.dispose();
   }
 
   /**
-   * Convenience: publish an event (e.g., agent.status).
+   * Generate pairing info for the mobile client.
+   * This is what gets encoded in a QR code or shared as a config blob.
    */
-  async publishEvent(method: string, data: any): Promise<void> {
-    await this.publish({
-      messageType: 'event',
-      method,
-      payload: JSON.stringify(data),
-    });
+  async getPairingInfo(): Promise<PubSubPairingInfo> {
+    const token = await this.tokenProvider.getToken();
+    return {
+      projectId: this.config.projectId,
+      topicName: this.config.topicName,
+      mobileSubscription: this.mobileSubscriptionName,
+      extensionSubscription: this.config.subscriptionName,
+      userId: this.userId,
+      accessToken: token,
+      tokenExpiry: Date.now() + 3_600_000,
+    };
   }
 
-  /**
-   * Convenience: publish a response to an RPC request.
-   */
-  async publishResponse(result: any, correlationId: string): Promise<void> {
-    await this.publish({
-      messageType: 'response',
-      correlationId,
-      payload: JSON.stringify({ result }),
-    });
-  }
+  // ─── Polling ───────────────────────────────────────────
 
-  /**
-   * Convenience: publish an error.
-   */
-  async publishError(error: string, correlationId?: string, errorCode?: number): Promise<void> {
-    await this.publish({
-      messageType: 'error',
-      correlationId,
-      payload: JSON.stringify({ error, errorCode }),
-    });
-  }
-
-  // ─── Subscribe (Pull) ─────────────────────────────────
-
-  /**
-   * Start polling the subscription for incoming messages.
-   */
-  startListening(callback: MessageCallback): void {
-    this.onMessage = callback;
-    this.disposed = false;
-
-    this.logger.info(`[PubSub] Starting pull subscription: ${this.subscriptionPath}`);
-    this.logger.info(`[PubSub] Polling every ${PubSubTransport.POLL_INTERVAL_MS}ms`);
+  private startPolling(): void {
+    this.logger.info(`[PubSub] Polling ${this.subscriptionPath} every ${this.pollIntervalMs}ms`);
 
     // Immediate first pull
     this.pull();
 
-    // Then poll on interval
     this.pollTimer = setInterval(() => {
       if (!this.isPolling) {
         this.pull();
       }
-    }, PubSubTransport.POLL_INTERVAL_MS);
+    }, this.pollIntervalMs);
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
   }
 
   /**
-   * Pull messages from the subscription and process them.
+   * Pull messages from the subscription, decode, deduplicate, and fire events.
    */
-  private async pull(): Promise<void> {
+  async pull(): Promise<void> {
     if (this.disposed || this.isPolling) return;
     this.isPolling = true;
 
     try {
-      const result = await this.pubsubFetch(
-        `${PubSubTransport.BASE_URL}/${this.subscriptionPath}:pull`,
-        { maxMessages: PubSubTransport.MAX_MESSAGES_PER_PULL },
+      const token = await this.tokenProvider.getToken();
+      const resp = await this.http.post(
+        `${PUBSUB_API_BASE_URL}/${this.subscriptionPath}:pull`,
+        { maxMessages: this.maxMessagesPerPull },
+        token,
       );
 
+      if (!resp.ok) {
+        const errText = await resp.text();
+        this.logger.error(`[PubSub] Pull failed (${resp.status}): ${errText}`);
+        this.isPolling = false;
+        return;
+      }
+
+      const result = await resp.json();
       const messages = result.receivedMessages || [];
+
       if (messages.length === 0) {
         this.isPolling = false;
         return;
@@ -309,30 +479,36 @@ export class PubSubTransport {
       const ackIds: string[] = [];
 
       for (const received of messages) {
+        ackIds.push(received.ackId);
+
         try {
-          const data = Buffer.from(received.message.data, 'base64').toString('utf-8');
-          const msg: PubSubMessage = JSON.parse(data);
+          const raw = Buffer.from(received.message.data, 'base64').toString('utf-8');
+          const envelope: PubSubEnvelope = JSON.parse(raw);
 
-          // Only process messages for this user
-          if (msg.userId === this.userId && msg.direction === 'mobile_to_ext') {
-            this.logger.info(`[PubSub] Received ${msg.messageType} from mobile`);
-            this.onMessage(msg);
+          // Deduplication
+          if (this.processedIds.has(envelope.id)) {
+            this.logger.info(`[PubSub] Skipping duplicate: ${envelope.id}`);
+            continue;
           }
+          this.trackProcessedId(envelope.id);
 
-          ackIds.push(received.ackId);
+          // Only process messages directed to the extension from this user
+          if (envelope.direction !== 'mobile_to_ext') continue;
+          if (envelope.userId !== this.userId) continue;
+
+          this.routeMessage(envelope);
         } catch (err: any) {
           this.logger.error(`[PubSub] Failed to parse message: ${err.message}`);
-          ackIds.push(received.ackId); // Ack bad messages too to avoid redelivery
         }
       }
 
-      // Acknowledge all processed messages
+      // Acknowledge all messages (including malformed ones to prevent redelivery)
       if (ackIds.length > 0) {
-        await this.pubsubFetch(
-          `${PubSubTransport.BASE_URL}/${this.subscriptionPath}:acknowledge`,
+        await this.http.post(
+          `${PUBSUB_API_BASE_URL}/${this.subscriptionPath}:acknowledge`,
           { ackIds },
+          token,
         );
-        this.logger.info(`[PubSub] Acknowledged ${ackIds.length} message(s)`);
       }
     } catch (err: any) {
       this.logger.error(`[PubSub] Pull error: ${err.message}`);
@@ -341,54 +517,97 @@ export class PubSubTransport {
     this.isPolling = false;
   }
 
-  // ─── Lifecycle ─────────────────────────────────────────
-
   /**
-   * Stop listening and clean up.
+   * Route a decoded envelope to the appropriate event emitter.
    */
-  dispose(): void {
-    this.disposed = true;
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
+  private routeMessage(envelope: PubSubEnvelope): void {
+    switch (envelope.messageType) {
+      case 'rpc':
+        // Fire the raw RPC JSON so server.ts can handle it identically to relay
+        this.logger.info(`[PubSub] RPC message received (${envelope.payload.length} bytes)`);
+        this.onMessage.fire(envelope.payload);
+        break;
+
+      case 'pairing':
+        this.clientCount++;
+        this.logger.info(`[PubSub] Mobile client paired (${this.clientCount} total)`);
+        this.onClientJoined.fire({ clientCount: this.clientCount });
+        break;
+
+      case 'disconnect':
+        this.clientCount = Math.max(0, this.clientCount - 1);
+        this.logger.info(`[PubSub] Mobile client disconnected (${this.clientCount} remaining)`);
+        this.onClientLeft.fire({ clientCount: this.clientCount });
+        break;
+
+      case 'heartbeat':
+        // No-op — just proves the channel is alive
+        break;
+
+      default:
+        this.logger.info(`[PubSub] Unknown message type: ${envelope.messageType}`);
     }
-    this.logger.info('[PubSub] Disposed');
+  }
+
+  // ─── Health Checks ─────────────────────────────────────
+
+  private startHealthChecks(): void {
+    this.healthTimer = setInterval(async () => {
+      try {
+        const healthy = await this.healthCheck();
+        if (!healthy && this.connected) {
+          this.logger.error('[PubSub] Health check failed — marking disconnected');
+          this.connected = false;
+          this.onDisconnected.fire();
+        }
+      } catch {
+        // Swallow — health check errors are logged inside healthCheck()
+      }
+    }, PUBSUB_HEALTH_CHECK_INTERVAL_MS);
+  }
+
+  private stopHealthChecks(): void {
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = null;
+    }
   }
 
   /**
-   * Check if the transport can connect (credentials are valid).
+   * Verify that credentials are valid and the subscription is reachable.
    */
   async healthCheck(): Promise<boolean> {
     try {
-      await this.getAccessToken();
-      // Try a pull with 0 messages to test connectivity
-      await this.pubsubFetch(
-        `${PubSubTransport.BASE_URL}/${this.subscriptionPath}:pull`,
+      const token = await this.tokenProvider.getToken();
+      const resp = await this.http.post(
+        `${PUBSUB_API_BASE_URL}/${this.subscriptionPath}:pull`,
         { maxMessages: 1 },
+        token,
       );
-      return true;
+      return resp.ok;
     } catch (err: any) {
-      this.logger.error(`[PubSub] Health check failed: ${err.message}`);
+      this.logger.error(`[PubSub] Health check error: ${err.message}`);
       return false;
     }
   }
 
-  /**
-   * Get the topic path for sharing with mobile clients.
-   */
-  getTopicInfo(): { projectId: string; topicPath: string; userId: string } {
-    return {
-      projectId: this.projectId,
-      topicPath: this.topicPath,
-      userId: this.userId,
-    };
-  }
+  // ─── Helpers ───────────────────────────────────────────
 
   /**
-   * Generate a short-lived token for the mobile client to use.
-   * Mobile uses this to publish/pull via REST API.
+   * Track a processed message ID for deduplication.
+   * Caps the set at MAX_PROCESSED_IDS to prevent unbounded growth.
    */
-  async generateMobileToken(): Promise<string> {
-    return this.getAccessToken();
+  private trackProcessedId(id: string): void {
+    this.processedIds.add(id);
+    if (this.processedIds.size > PubSubTransport.MAX_PROCESSED_IDS) {
+      // Remove oldest entries (Set iteration order is insertion order)
+      const toRemove = this.processedIds.size - PubSubTransport.MAX_PROCESSED_IDS;
+      let removed = 0;
+      for (const oldId of this.processedIds) {
+        if (removed >= toRemove) break;
+        this.processedIds.delete(oldId);
+        removed++;
+      }
+    }
   }
 }

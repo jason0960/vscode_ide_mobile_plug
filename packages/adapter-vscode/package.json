@@ -61,6 +61,22 @@
       {
         "command": "mobile-copilot.disconnectRelay",
         "title": "Mobile Copilot: Disconnect Cloud Relay"
+      },
+      {
+        "command": "mobile-copilot.showExpoQR",
+        "title": "Mobile Copilot: Show Expo Go QR Code"
+      },
+      {
+        "command": "mobile-copilot.changeRoom",
+        "title": "Mobile Copilot: Change Relay Room"
+      },
+      {
+        "command": "mobile-copilot.relayMenu",
+        "title": "Mobile Copilot: Relay Options"
+      },
+      {
+        "command": "mobile-copilot.showPairingInfo",
+        "title": "Mobile Copilot: Show Pub/Sub Pairing QR"
       }
     ],
     "configuration": {
@@ -70,6 +86,11 @@
           "type": "number",
           "default": 3847,
           "description": "Port for the mobile server."
+        },
+        "mobileCopilot.expoPort": {
+          "type": "number",
+          "default": 8081,
+          "description": "Port where the Expo Metro dev server runs (for Expo Go QR code)."
         },
         "mobileCopilot.tunnelProvider": {
           "type": "string",
@@ -94,8 +115,37 @@
         },
         "mobileCopilot.relayUrl": {
           "type": "string",
-          "default": "wss://gopilot-relay.onrender.com",
-          "markdownDescription": "WebSocket URL of the cloud relay server. The default `wss://gopilot-relay.onrender.com` works out of the box. Set to empty to disable relay mode."
+          "default": "",
+          "markdownDescription": "WebSocket URL of an external relay server (e.g. `wss://gopilot-relay.onrender.com`). Used when `transportType` is `relay`."
+        },
+        "mobileCopilot.transportType": {
+          "type": "string",
+          "enum": [
+            "relay",
+            "pubsub"
+          ],
+          "default": "relay",
+          "markdownDescription": "Transport layer for mobile ↔ extension communication.\n- **relay**: WebSocket relay hub (requires `relayUrl`).\n- **pubsub**: Google Cloud Pub/Sub (serverless, requires `pubsub.projectId`)."
+        },
+        "mobileCopilot.pubsub.projectId": {
+          "type": "string",
+          "default": "project-004bd74a-29f1-45a3-a14",
+          "markdownDescription": "Google Cloud project ID for Pub/Sub transport. Required when `transportType` is `pubsub`."
+        },
+        "mobileCopilot.pubsub.topicName": {
+          "type": "string",
+          "default": "GoPilot",
+          "markdownDescription": "Pub/Sub topic name. The topic must exist in the configured project."
+        },
+        "mobileCopilot.pubsub.subscriptionName": {
+          "type": "string",
+          "default": "GoPilot-extension-sub",
+          "markdownDescription": "Pub/Sub subscription name for the extension to pull from (mobile → extension messages)."
+        },
+        "mobileCopilot.pubsub.mobileSubscriptionName": {
+          "type": "string",
+          "default": "GoPilot-mobile-sub",
+          "markdownDescription": "Pub/Sub subscription name for the mobile app to pull from (extension → mobile messages). Included in pairing info."
         },
         "mobileCopilot.captureMode": {
           "type": "string",

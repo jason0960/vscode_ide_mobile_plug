@@ -2,21 +2,7 @@
 dist/
 node_modules/
 *.vsix
-mobile-client/node_modules/
-.copilot-mobile-relay.md
-.expo/
-packages/mobile-app/.expo/
-packages/mobile-app/dist/
-FIXES_LOG.md
-
-# ECC agent profiles (local tooling, not project code)
-.agents-commands/
-.agents-hooks.json
-.agents-profiles/
-.agents-rules/
-.agents-skills/
-AGENTS.md
-
-# Build artifacts
 *.tsbuildinfo
 coverage/
+.copilot-mobile-relay.md
+.expo/

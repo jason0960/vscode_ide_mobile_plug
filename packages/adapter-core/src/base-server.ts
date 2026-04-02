@@ -55,14 +55,35 @@ export abstract class BaseServer {
 
     this.port = this.getPort();
     this.setupExpress();
+    this.setupRpcHandlers();
+
+    const maxRetries = 10;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        await this.tryListen(this.port + attempt);
+        this.port = this.port + attempt;
+        return;
+      } catch (err: any) {
+        if (err.code === 'EADDRINUSE' && attempt < maxRetries - 1) {
+          this.logger.info(`[Server] Port ${this.port + attempt} in use, trying ${this.port + attempt + 1}...`);
+          // Clean up for retry
+          this.server = null;
+          this.wss = null;
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  private tryListen(port: number): Promise<void> {
     this.server = createServer(this.app);
     this.wss = new WebSocketServer({ server: this.server });
     this.setupWebSocket();
-    this.setupRpcHandlers();
 
     return new Promise((resolve, reject) => {
-      this.server!.listen(this.port, () => {
-        this.logger.info(`[Server] Listening on port ${this.port}`);
+      this.server!.listen(port, () => {
+        this.logger.info(`[Server] Listening on port ${port}`);
         this.onServerStarted();
         resolve();
       });
@@ -113,21 +134,15 @@ export abstract class BaseServer {
       res.json({ status: 'ok', version: '0.2.0', clients: this.clients.size });
     });
 
-    // Dev pairing info — returns token + pairing URL (localhost only, requires DEBUG_PAIR=1 env flag)
+    // Dev pairing info — returns token + pairing URL (localhost only)
     this.app.get('/api/pair-info', async (req, res) => {
-      if (process.env.DEBUG_PAIR !== '1') {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
-      // Strict loopback check — strip IPv4-mapped IPv6 prefix before comparing
-      const rawIp = (req.ip || req.socket.remoteAddress || '').replace(/^::ffff:/, '');
-      const isLoopback = rawIp === '127.0.0.1' || rawIp === '::1';
-      if (!isLoopback) {
+      // Only allow from localhost for security
+      const ip = req.ip || req.socket.remoteAddress || '';
+      if (!ip.includes('127.0.0.1') && !ip.includes('::1') && !ip.includes('::ffff:127.0.0.1')) {
         return res.status(403).json({ error: 'Forbidden' });
       }
       const token = await this.auth.getToken();
       const serverUrl = `http://localhost:${this.port}`;
-      // Restrict CORS for this sensitive endpoint to same origin only
-      res.header('Access-Control-Allow-Origin', `http://localhost:${this.port}`);
       res.json({ token, pairingUrl: `${serverUrl}/pair?token=${token}`, wsUrl: `ws://localhost:${this.port}/ws` });
     });
 

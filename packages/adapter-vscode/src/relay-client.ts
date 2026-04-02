@@ -48,12 +48,12 @@ export class RelayClient {
   /**
    * Connect to the relay server and create a room.
    */
-  async connect(): Promise<string> {
+  async connect(overrideUrl?: string): Promise<string> {
     if (this.isConnected && this.roomCode) {
       return this.roomCode;
     }
 
-    const relayUrl = (this.config.get<string>('relayUrl', '') ?? '').replace(/\/$/, '');
+    const relayUrl = (overrideUrl ?? this.config.get<string>('relayUrl', '') ?? '').replace(/\/$/, '');
     if (!relayUrl) {
       throw new Error(
         'No relay URL configured. Set mobileCopilot.relayUrl in settings ' +
