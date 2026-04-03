@@ -1,7 +1,7 @@
 {
-  "name": "mobile-copilot",
-  "displayName": "Mobile Copilot Remote",
-  "description": "Control VS Code Copilot Chat from your mobile device — full agent mode with file ops, terminal, diagnostics, and streaming chat.",
+  "name": "agentdeck",
+  "displayName": "AgentDeck Command Center",
+  "description": "Control VS Code Copilot Chat from your phone — full agent mode with file editing, terminal, git diffs, diagnostics, and streaming responses.",
   "version": "0.2.0",
   "publisher": "jason0960",
   "license": "MIT",
@@ -40,7 +40,7 @@
     "chatParticipants": [
       {
         "id": "mobile-copilot.relay",
-        "fullName": "Mobile Copilot",
+        "fullName": "AgentDeck",
         "name": "mobile",
         "description": "Relay prompts from your mobile device to Copilot — responses stream back to your phone.",
         "isSticky": true
@@ -93,7 +93,7 @@
       }
     ],
     "configuration": {
-      "title": "Mobile Copilot",
+      "title": "AgentDeck Command Center",
       "properties": {
         "mobileCopilot.port": {
           "type": "number",

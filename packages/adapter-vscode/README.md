@@ -1,4 +1,4 @@
-# Mobile Copilot Remote
+# AgentDeck Command Center
 
 > Control VS Code Copilot Chat from your phone — full agent mode with file editing, terminal commands, diagnostics, git diffs, and streaming responses.
 
