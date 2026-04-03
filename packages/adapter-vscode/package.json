@@ -5,6 +5,19 @@
   "version": "0.2.0",
   "publisher": "jason0960",
   "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jason0960/vscode_ide_mobile_plug"
+  },
+  "homepage": "https://github.com/jason0960/vscode_ide_mobile_plug#readme",
+  "bugs": {
+    "url": "https://github.com/jason0960/vscode_ide_mobile_plug/issues"
+  },
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.95.0"
   },
