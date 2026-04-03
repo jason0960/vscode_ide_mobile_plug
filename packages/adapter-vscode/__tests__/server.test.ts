@@ -304,12 +304,11 @@ describe('VsCodeServer', () => {
       });
 
       it('returns default when config value is null', () => {
-        // After mockReturnValue(null), config.get always returns null.
-        // The server code uses config.get('port', 3847), but the mock
-        // bypasses VsCodeConfig logic so null is returned directly.
+        // config.get('port', 3847) returns null from the mock, but
+        // getPort() applies `?? 3847` so null coalesces to the default.
         config.get.mockReturnValue(null);
         const port = (server as any).getPort();
-        expect(port).toBeNull();
+        expect(port).toBe(3847);
       });
     });
 
