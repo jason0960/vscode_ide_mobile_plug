@@ -73,7 +73,7 @@ export class VsCodeServer extends BaseServer {
   // ─── BaseServer hooks ───────────────────────────────────────────
 
   protected getPort(): number {
-    return this.config.get<number>('port', 3847);
+    return this.config.get<number>('port', 3847) ?? 3847;
   }
 
   protected getStaticFilesPath(): string {
@@ -92,7 +92,7 @@ export class VsCodeServer extends BaseServer {
     const provider = this.config.get<string>('tunnelProvider', 'none');
     if (provider !== 'none') {
       try {
-        const tunnelUrl = await this.tunnel.startTunnel(this.port);
+        const tunnelUrl = await (this.tunnel as VsCodeTunnel).startTunnel(this.port);
         this.logger.info(`Tunnel active: ${tunnelUrl}`);
         this.updateStatusBar('tunnel');
       } catch (err: any) {
@@ -185,8 +185,8 @@ export class VsCodeServer extends BaseServer {
       return new PubSubTransport({
         config: {
           projectId,
-          topicName,
-          subscriptionName,
+          topicName: topicName || 'GoPilot',
+          subscriptionName: subscriptionName || 'GoPilot-extension-sub',
         },
         mobileSubscriptionName,
         userId,
@@ -528,7 +528,7 @@ export class VsCodeServer extends BaseServer {
         try {
           const status = execSync(`git status --porcelain -- "${filePath}"`, {
             cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
-          }).trim();
+          }).trimEnd();
           if (status.startsWith('??')) {
             execSync(`rm -f "${filePath}"`, { cwd: wsFolder.uri.fsPath });
           } else {
@@ -978,7 +978,7 @@ export class VsCodeServer extends BaseServer {
           try {
             const status = execSync(`git status --porcelain -- "${filePath}"`, {
               cwd: wsFolder.uri.fsPath, encoding: 'utf-8',
-            }).trim();
+            }).trimEnd();
             if (status.startsWith('??') || status.startsWith('A ')) {
               const content = execSync(`cat "${filePath}"`, {
                 cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
@@ -1016,7 +1016,7 @@ export class VsCodeServer extends BaseServer {
     try {
       statusOutput = execSync('git status --porcelain', {
         cwd: wsFolder.uri.fsPath, encoding: 'utf-8', maxBuffer: 1024 * 256,
-      }).trim();
+      }).trimEnd();
     } catch {
       return { files: [], summary: { modified: 0, added: 0, deleted: 0, totalAdded: 0, totalRemoved: 0 } };
     }

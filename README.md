@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/GitHub%20Copilot-Required-green" alt="Copilot required" />
   <img src="https://img.shields.io/badge/License-MIT-yellow" alt="MIT License" />
   <img src="https://img.shields.io/badge/v0.2.0-stable-brightgreen" alt="v0.2.0" />
-  <img src="https://img.shields.io/badge/tests-581%20passing-brightgreen" alt="581 tests" />
+  <img src="https://img.shields.io/badge/tests-698%20passing-brightgreen" alt="698 tests" />
   <img src="https://img.shields.io/badge/coverage-76%25-green" alt="76% coverage" />
 </p>
 
@@ -119,18 +119,31 @@ Reload VS Code: `Ctrl+Shift+P` → **Developer: Reload Window**
 
 ## Quick Start
 
-### Relay Mode + Mobile App (recommended)
+### Pub/Sub Mode + Mobile App (recommended)
 
-The system is split into 3 independent repos. Use the **React Native mobile app** (`gopilot-mobile`) with the cloud relay server (`gopilot-relay`).
+The system uses **Google Cloud Pub/Sub** for serverless, low-latency communication — no WebSocket relay needed for message transport. A lightweight relay server handles only the initial **pairing exchange**.
 
 **VS Code Extension:**
 ```bash
 npm run build                    # Build the extension
 npm run install-ext              # Install into VS Code
-# Reload VS Code, then:
-# Ctrl+Shift+P → Mobile Copilot: Connect Cloud Relay
-# Note the 6-character room code displayed
+# Reload VS Code — extension auto-starts and shows a 6-char pairing code
 ```
+
+**Mobile App** (separate repo — `gopilot-mobile`):
+```bash
+cd ../gopilot-mobile
+npm install
+npx expo start                   # Scan QR with Expo Go on your phone
+```
+
+Enter the 6-character pairing code on the Relay tab → the app fetches Pub/Sub credentials from the relay → connects via Pub/Sub → start chatting with full Copilot agent mode.
+
+> **Tip:** The pairing code is one-time-use and expires after 10 minutes.
+
+### Relay Mode (WebSocket fallback)
+
+If Pub/Sub is not configured, the system falls back to **WebSocket relay** mode via the cloud relay server (`gopilot-relay`).
 
 **Relay Server** (separate repo — `gopilot-relay`):
 ```bash
@@ -138,14 +151,7 @@ cd ../gopilot-relay
 npm install && npm start         # Starts on http://localhost:4800
 ```
 
-**Mobile App** (separate repo — `gopilot-mobile`):
-```bash
-cd ../gopilot-mobile
-npm install
-CI=1 EXPO_NO_TYPESCRIPT_SETUP=1 npx expo start --web --clear   # Metro on port 8081
-```
-
-Open `http://localhost:8081` in a browser (or run on a physical device via Expo Go). Enter the 6-character room code → authenticate → start chatting with full Copilot agent mode.
+The mobile app automatically detects whether a room code is a Pub/Sub pairing or a WebSocket relay room — just enter the code and it handles the rest.
 
 > **Tip:** Set `mobileCopilot.relayUrl` in VS Code settings if the relay isn't on localhost.
 
@@ -211,6 +217,8 @@ Set `mobileCopilot.tunnelProvider` to `ngrok`, restart the server.
 | `mobileCopilot.sessionTimeout` | `3600` | Session timeout in seconds (0 = never) |
 | `mobileCopilot.captureMode` | `relay` | Agent response capture strategy |
 | `mobileCopilot.modelFamily` | `gpt-4o` | Default model for Chat mode |
+| `mobileCopilot.transportType` | `relay` | `relay` (WebSocket) or `pubsub` (GCP Pub/Sub) |
+| `mobileCopilot.pairingRelayUrl` | `https://gopilot-relay.onrender.com` | Relay server URL for pairing code exchange |
 
 ### Capture Modes
 
@@ -225,17 +233,18 @@ Set `mobileCopilot.tunnelProvider` to `ngrok`, restart the server.
 ## Architecture
 
 ```
-Phone (PWA)                         Desktop (VS Code Extension)
-───────────                         ───────────────────────────
-app.js ←──── WebSocket ────→  server.ts     Express + WebSocket + RPC
-             JSON-RPC              ├── agent.ts       File ops, terminal, git
-             (LAN or tunnel)       ├── copilot.ts     vscode.lm API bridge
-                                   ├── participant.ts @mobile chat participant
-                                   ├── interceptor.ts Doc change monitor
-                                   ├── context.ts     Workspace info, file tree
-                                   ├── auth.ts        QR pairing, token auth
-                                   ├── rpc.ts         JSON-RPC protocol
-                                   └── tunnel.ts      Cloudflare/ngrok/VS Code
+Phone (Expo Go / PWA)               Desktop (VS Code Extension)
+─────────────────────               ───────────────────────────
+App.tsx ←── Pub/Sub ───→  server.ts     Express + WebSocket + RPC
+          or WebSocket         ├── pubsub-transport.ts  GCP Pub/Sub bridge
+          (JSON-RPC)           ├── agent.ts       File ops, terminal, git
+                               ├── copilot.ts     vscode.lm API bridge
+                               ├── participant.ts @mobile chat participant
+                               ├── interceptor.ts Doc change monitor
+                               ├── context.ts     Workspace info, file tree
+                               ├── auth.ts        QR pairing, token auth
+                               ├── relay-client.ts WebSocket relay fallback
+                               └── tunnel.ts      Cloudflare/ngrok/VS Code
 ```
 
 ### RPC Protocol
@@ -269,12 +278,15 @@ app.js ←──── WebSocket ────→  server.ts     Express + WebSoc
 
 ## Security
 
-- **Your code never leaves your machine** — no cloud service; communication is direct LAN or via your chosen tunnel
+- **Your code never leaves your machine** — no cloud service stores your code; communication is direct LAN, tunnel, or via Google Cloud Pub/Sub (messages are ephemeral, not persisted)
 - **256-bit cryptographic tokens** — generated via `crypto.randomBytes`, stored in VS Code SecretStorage
 - **QR code pairing** — token embedded in QR, stripped from URL after pairing
+- **One-time pairing codes** — Pub/Sub pairing info is fetched once and deleted from the relay server (10-min TTL)
+- **Automatic token refresh** — extension refreshes GCP access tokens every 45 minutes, pushes updated tokens to mobile via Pub/Sub
 - **Timing-safe comparison** — constant-time token validation prevents timing attacks
-- **TLS encryption** — tunnels provide automatic HTTPS
+- **TLS encryption** — tunnels provide automatic HTTPS; Pub/Sub uses HTTPS API
 - **Path traversal protection** — all git/file operations validate paths stay within workspace root via `resolveWorkspacePath()`
+- **Avro schema validation** — Pub/Sub topic enforces message schema (GoPilotSchemaV2) to reject malformed messages
 - **Relay DoS hardening** — message size limits (64KB), per-socket rate limiting (60 msg/s), per-room client caps (10), per-IP connection rate limiting
 - **IP spoofing prevention** — `x-forwarded-for` only trusted when `trustProxy: true` is explicitly set
 - **No silent failures** — room code generation throws after 100 collision retries instead of returning duplicates
@@ -398,7 +410,32 @@ EXPO_PUBLIC_RELAY_URL=wss://your-relay.example.com npx expo start
 
 Or change it at runtime in the app's **Settings** screen.
 
-### Relay Connection Flow
+### Pub/Sub Connection Flow (recommended)
+
+```
+┌─────────────┐  POST /pair   ┌──────────────┐  GET /pair/:code  ┌─────────────┐
+│  VS Code    │ ────────────► │ Relay Server │ ◄──────────────── │ Mobile App  │
+│  Extension  │               │ (pairing only)│                   │ (Expo)      │
+└──────┬──────┘               └──────────────┘                   └──────┬──────┘
+       │                                                                │
+       │    publish (ext_to_mobile)     ┌──────────────┐                │
+       ├──────────────────────────────► │  GCP Pub/Sub │ ◄──────────────┤
+       │    pull (mobile_to_ext)        │    Topic     │  publish/pull  │
+       ◄──────────────────────────────  └──────────────┘ ──────────────►│
+```
+
+1. Extension POSTs Pub/Sub pairing info (project, topic, subscriptions, access token) to relay `/pair` → gets a 6-char code
+2. User enters code in mobile app's "Relay" tab
+3. Mobile GETs `/pair/:code` → receives Pub/Sub credentials (one-time fetch, auto-deleted)
+4. Mobile connects to GCP Pub/Sub using the received credentials
+5. All subsequent RPC calls flow bidirectionally through Pub/Sub (no relay involvement)
+6. Extension refreshes access tokens every 45 min and pushes `token_refresh` messages via Pub/Sub
+
+**Pairing codes** are 6 uppercase alphanumeric chars (no ambiguous 0/O/1/I). One-time use, 10-min TTL.
+
+**Avro schema:** Messages are validated against `GoPilotSchemaV2` (Avro JSON encoding). Union-type fields use `null` / `{"string": "value"}` format.
+
+### WebSocket Relay Connection Flow (fallback)
 
 ```
 ┌─────────────┐     WS /relay/host      ┌──────────────┐     WS /relay/join?code=X    ┌─────────────┐
@@ -460,7 +497,7 @@ npx @vscode/vsce package --no-dependencies --allow-missing-repository
 
 ### Test Suite
 
-581 automated tests across 15 suites with 76% overall coverage.
+698 automated tests across 18 suites with 76% overall coverage.
 
 ```bash
 npm test                       # Run all tests
@@ -476,7 +513,10 @@ npm run test:watch             # Watch mode
 | **adapter-core** | 93.8% | 94.5% | Auth, base server, tunnel |
 | **adapter-vscode** | 66.6% | 67.0% | server.ts (75%), agent.ts (93%), copilot.ts (79%) |
 
-> Relay server and mobile app coverage tracked in their respective repos (`gopilot-relay`, `gopilot-mobile`).
+| **relay-server** | — | — | Tracked in `gopilot-relay` (58 tests) |
+| **mobile-app** | — | — | Tracked in `gopilot-mobile` (135 tests) |
+
+> Total across all repos: **698 tests** (505 extension + 58 relay + 135 mobile).
 
 ### CI/CD
 
