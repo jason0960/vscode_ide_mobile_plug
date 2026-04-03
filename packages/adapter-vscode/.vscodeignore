@@ -16,6 +16,12 @@ README.md.bak
 package-lock.json
 **/.github/**
 
+# Sibling packages (already bundled by esbuild)
+../adapter-core/**
+../protocol/**
+../relay-server/**
+../mobile-app/**
+
 # ECC agent configs (monorepo root — must not be packed)
 ../../.agents-*/**
 ../../.agents-hooks.json
