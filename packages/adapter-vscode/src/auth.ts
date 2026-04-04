@@ -42,7 +42,7 @@ export class VsCodeAuth extends BaseAuth {
 
     const panel = vscode.window.createWebviewPanel(
       'mobileCopilotQR',
-      'Mobile Copilot — Pair',
+      'AgentDeck — Pair',
       vscode.ViewColumn.Beside,
       { enableScripts: false },
     );

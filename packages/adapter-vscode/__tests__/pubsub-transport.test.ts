@@ -713,7 +713,7 @@ describe('PubSubTransport', () => {
       expect(result).toBe(true);
     });
 
-    it('should return false when API returns error', async () => {
+    it('should return false when API returns error after retries', async () => {
       http.setNextResponse({
         ok: false,
         status: 503,
@@ -721,11 +721,16 @@ describe('PubSubTransport', () => {
         json: async () => ({}),
       });
 
-      const result = await transport.healthCheck();
+      const resultPromise = transport.healthCheck();
+      // Advance timers in a loop to allow retry delays to resolve
+      for (let i = 0; i < 10; i++) {
+        await jest.advanceTimersByTimeAsync(1000);
+      }
+      const result = await resultPromise;
       expect(result).toBe(false);
     });
 
-    it('should return false and log on network error', async () => {
+    it('should return false and log on network error after retries', async () => {
       const errorHttp = createMockHttpClient({
         async post() { throw new Error('ECONNREFUSED'); },
       });
@@ -736,11 +741,16 @@ describe('PubSubTransport', () => {
         logger,
         httpClient: errorHttp,
         tokenProvider,
+        pollIntervalMs: 100,
       });
 
-      const result = await t.healthCheck();
+      const resultPromise = t.healthCheck();
+      for (let i = 0; i < 10; i++) {
+        await jest.advanceTimersByTimeAsync(500);
+      }
+      const result = await resultPromise;
       expect(result).toBe(false);
-      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Health check error'));
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Health check attempt'));
 
       t.dispose();
     });
@@ -1021,6 +1031,191 @@ describe('PubSubTransport', () => {
 
       t.dispose();
       global.fetch = originalFetch;
+    });
+  });
+
+  // ─── Phase 1: Pull retry with backoff ─────────────────
+
+  describe('pull retry with backoff', () => {
+    let http: ReturnType<typeof createMockHttpClient>;
+    let tokenProvider: ReturnType<typeof createMockTokenProvider>;
+    let logger: ReturnType<typeof createMockLogger>;
+
+    beforeEach(() => {
+      http = createMockHttpClient();
+      tokenProvider = createMockTokenProvider();
+      logger = createMockLogger();
+    });
+
+    it('should stay connected on transient pull failures below max retries', async () => {
+      let pullCount = 0;
+      const flakyHttp = createMockHttpClient({
+        async post(url: string, body: unknown, token: string) {
+          if (url.includes(':pull')) {
+            pullCount++;
+            if (pullCount <= 2) {
+              return { ok: false, status: 500, json: async () => ({}), text: async () => 'Internal Server Error' };
+            }
+            return { ok: true, status: 200, json: async () => ({ receivedMessages: [] }), text: async () => '' };
+          }
+          return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+        },
+      });
+
+      const t = new PubSubTransport(createTransportOptions({
+        httpClient: flakyHttp,
+        tokenProvider,
+        logger,
+      }));
+
+      // Connect first
+      flakyHttp.calls.length = 0;
+      pullCount = 0;
+      (t as any).connected = true;
+      (t as any).disposed = false;
+
+      // Two failures then success
+      await t.pull(); // fails 1
+      expect(t.isConnected).toBe(true);
+      await t.pull(); // fails 2
+      expect(t.isConnected).toBe(true);
+      await t.pull(); // succeeds
+      expect(t.isConnected).toBe(true);
+
+      t.dispose();
+    });
+
+    it('should disconnect after MAX_POLL_RETRIES consecutive failures', async () => {
+      const alwaysFailHttp = createMockHttpClient({
+        async post(url: string) {
+          if (url.includes(':pull')) {
+            return { ok: false, status: 500, json: async () => ({}), text: async () => 'Error' };
+          }
+          return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+        },
+      });
+
+      const t = new PubSubTransport(createTransportOptions({
+        httpClient: alwaysFailHttp,
+        tokenProvider,
+        logger,
+      }));
+
+      (t as any).connected = true;
+      (t as any).disposed = false;
+
+      const disconnected: boolean[] = [];
+      t.onDisconnected.event(() => disconnected.push(true));
+
+      // 3 consecutive failures should trigger disconnect
+      await t.pull();
+      await t.pull();
+      await t.pull();
+
+      expect(disconnected.length).toBe(1);
+      expect(t.isConnected).toBe(false);
+
+      t.dispose();
+    });
+
+    it('should reset failure counter on successful pull', async () => {
+      let pullCount = 0;
+      const flakyHttp = createMockHttpClient({
+        async post(url: string) {
+          if (url.includes(':pull')) {
+            pullCount++;
+            if (pullCount === 1) {
+              return { ok: false, status: 500, json: async () => ({}), text: async () => 'Error' };
+            }
+            return { ok: true, status: 200, json: async () => ({ receivedMessages: [] }), text: async () => '' };
+          }
+          return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+        },
+      });
+
+      const t = new PubSubTransport(createTransportOptions({
+        httpClient: flakyHttp,
+        tokenProvider,
+        logger,
+      }));
+
+      (t as any).connected = true;
+      (t as any).disposed = false;
+
+      await t.pull(); // fails once
+      await t.pull(); // succeeds — resets counter
+      expect(t.isConnected).toBe(true);
+      expect((t as any).pollFailures).toBe(0);
+
+      t.dispose();
+    });
+  });
+
+  // ─── Phase 1: Health check retry ──────────────────────
+
+  describe('health check retry', () => {
+    it('should return true if health check eventually succeeds', async () => {
+      let attempts = 0;
+      const flakyHttp = createMockHttpClient({
+        async post(url: string) {
+          if (url.includes(':pull')) {
+            attempts++;
+            if (attempts <= 2) {
+              return { ok: false, status: 503, json: async () => ({}), text: async () => 'Unavailable' };
+            }
+            return { ok: true, status: 200, json: async () => ({ receivedMessages: [] }), text: async () => '' };
+          }
+          return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+        },
+      });
+
+      const t = new PubSubTransport(createTransportOptions({
+        httpClient: flakyHttp,
+        tokenProvider: createMockTokenProvider(),
+        logger: createMockLogger(),
+      }));
+
+      (t as any).connected = true;
+      (t as any).disposed = false;
+
+      const resultPromise = t.healthCheck();
+      for (let i = 0; i < 10; i++) {
+        await jest.advanceTimersByTimeAsync(500);
+      }
+      const result = await resultPromise;
+      expect(result).toBe(true);
+      expect(attempts).toBe(3); // 2 failures + 1 success
+
+      t.dispose();
+    });
+
+    it('should return false after all retries fail', async () => {
+      const alwaysFailHttp = createMockHttpClient({
+        async post(url: string) {
+          if (url.includes(':pull')) {
+            return { ok: false, status: 503, json: async () => ({}), text: async () => 'Unavailable' };
+          }
+          return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+        },
+      });
+
+      const t = new PubSubTransport(createTransportOptions({
+        httpClient: alwaysFailHttp,
+        tokenProvider: createMockTokenProvider(),
+        logger: createMockLogger(),
+      }));
+
+      (t as any).connected = true;
+      (t as any).disposed = false;
+
+      const resultPromise = t.healthCheck();
+      for (let i = 0; i < 10; i++) {
+        await jest.advanceTimersByTimeAsync(500);
+      }
+      const result = await resultPromise;
+      expect(result).toBe(false);
+
+      t.dispose();
     });
   });
 });

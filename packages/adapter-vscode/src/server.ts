@@ -21,7 +21,7 @@ import {
 } from './participant';
 
 /**
- * VS Code implementation of the Mobile Copilot server.
+ * VS Code implementation of the AgentDeck server.
  * Extends the portable BaseServer with IDE-specific RPC handlers,
  * capture strategies, workspace event listeners, and status bar.
  */
@@ -104,7 +104,7 @@ export class VsCodeServer extends BaseServer {
     this.statusBarItem.show();
     this.setupWorkspaceListeners();
 
-    this.logger.info(`Mobile Copilot server running on port ${this.port}`);
+    this.logger.info(`AgentDeck server running on port ${this.port}`);
   }
 
   protected onServerStopping(): void {
@@ -116,7 +116,7 @@ export class VsCodeServer extends BaseServer {
 
   protected onServerStopped(): void {
     this.updateStatusBar('stopped');
-    vscode.window.showInformationMessage('Mobile Copilot server stopped.');
+    vscode.window.showInformationMessage('AgentDeck server stopped.');
   }
 
   protected onClientConnected(_ws: WebSocket, _sessionId: string): void {
@@ -162,7 +162,7 @@ export class VsCodeServer extends BaseServer {
     logger: ILogger,
     config: VsCodeConfig,
   ): MobileTransport {
-    const transportType = config.get<TransportType>('transportType', 'relay');
+    const transportType = config.get<TransportType>('transportType', 'pubsub');
 
     if (transportType === 'pubsub') {
       const projectId = config.get<string>('pubsub.projectId', 'project-004bd74a-29f1-45a3-a14');
@@ -1104,13 +1104,13 @@ export class VsCodeServer extends BaseServer {
     switch (state) {
       case 'stopped':
         this.statusBarItem.text = '$(device-mobile) Mobile: Off';
-        this.statusBarItem.tooltip = 'Click to start Mobile Copilot';
+        this.statusBarItem.tooltip = 'Click to start AgentDeck';
         this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = undefined;
         break;
       case 'running':
         this.statusBarItem.text = '$(broadcast) Mobile: LAN';
-        this.statusBarItem.tooltip = `Mobile Copilot on port ${this.port}\nClick to show QR code`;
+        this.statusBarItem.tooltip = `AgentDeck on port ${this.port}\nClick to show QR code`;
         this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = undefined;
         break;

@@ -400,7 +400,7 @@ describe('Extension activation', () => {
       activate(context);
       await new Promise(r => setTimeout(r, 10));
       expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
-        'Mobile Copilot auto-start failed: Port in use',
+        'AgentDeck auto-start failed: Port in use',
       );
     });
   });

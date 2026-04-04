@@ -7,7 +7,7 @@ import type { ILogger } from '@mobile-copilot/adapter-core';
 export class VsCodeLogger implements ILogger {
   public readonly channel: vscode.LogOutputChannel;
 
-  constructor(name: string = 'Mobile Copilot') {
+  constructor(name: string = 'AgentDeck') {
     this.channel = vscode.window.createOutputChannel(name, { log: true });
   }
 

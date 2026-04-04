@@ -320,6 +320,12 @@ export class PubSubTransport {
   private readonly processedIds = new Set<string>();
   private static readonly MAX_PROCESSED_IDS = 1000;
 
+  /** Max consecutive poll failures before disconnecting. */
+  private static readonly MAX_POLL_RETRIES = 3;
+
+  /** Consecutive poll failure count. */
+  private pollFailures = 0;
+
   constructor(options: PubSubTransportOptions) {
     this.config = options.config;
     this.mobileSubscriptionName = options.mobileSubscriptionName || `mobile-${options.userId}`;
@@ -465,6 +471,7 @@ export class PubSubTransport {
     this.pairingCode = null;
     this.clientCount = 0;
     this.processedIds.clear();
+    this.pollFailures = 0;
     this.onDisconnected.fire();
     this.logger.info('[PubSub] Disconnected');
   }
@@ -655,11 +662,21 @@ export class PubSubTransport {
       );
 
       if (!resp.ok) {
+        this.pollFailures++;
         const errText = await resp.text();
         this.logger.error(`[PubSub] Pull failed (${resp.status}): ${errText}`);
+
+        if (this.pollFailures >= PubSubTransport.MAX_POLL_RETRIES && this.connected) {
+          this.logger.error(`[PubSub] ${PubSubTransport.MAX_POLL_RETRIES} consecutive pull failures — disconnecting`);
+          this.connected = false;
+          this.onDisconnected.fire();
+        }
         this.isPolling = false;
         return;
       }
+
+      // Success — reset failure counter
+      this.pollFailures = 0;
 
       const result = await resp.json();
       const messages = result.receivedMessages || [];
@@ -705,7 +722,14 @@ export class PubSubTransport {
         );
       }
     } catch (err: any) {
+      this.pollFailures++;
       this.logger.error(`[PubSub] Pull error: ${err.message}`);
+
+      if (this.pollFailures >= PubSubTransport.MAX_POLL_RETRIES && this.connected) {
+        this.logger.error(`[PubSub] ${PubSubTransport.MAX_POLL_RETRIES} consecutive pull failures — disconnecting`);
+        this.connected = false;
+        this.onDisconnected.fire();
+      }
     }
 
     this.isPolling = false;
@@ -769,20 +793,28 @@ export class PubSubTransport {
 
   /**
    * Verify that credentials are valid and the subscription is reachable.
+   * Retries up to 3 times with exponential backoff before returning false.
    */
   async healthCheck(): Promise<boolean> {
-    try {
-      const token = await this.tokenProvider.getToken();
-      const resp = await this.http.post(
-        `${PUBSUB_API_BASE_URL}/${this.subscriptionPath}:pull`,
-        { maxMessages: 1 },
-        token,
-      );
-      return resp.ok;
-    } catch (err: any) {
-      this.logger.error(`[PubSub] Health check error: ${err.message}`);
-      return false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const token = await this.tokenProvider.getToken();
+        const resp = await this.http.post(
+          `${PUBSUB_API_BASE_URL}/${this.subscriptionPath}:pull`,
+          { maxMessages: 1 },
+          token,
+        );
+        if (resp.ok) return true;
+        this.logger.error(`[PubSub] Health check attempt ${attempt}/3 failed (${resp.status})`);
+      } catch (err: any) {
+        this.logger.error(`[PubSub] Health check attempt ${attempt}/3 error: ${err.message}`);
+      }
+      // Brief pause between retries (except last)
+      if (attempt < 3) {
+        await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs * attempt));
+      }
     }
+    return false;
   }
 
   // ─── Helpers ───────────────────────────────────────────

@@ -191,6 +191,7 @@ function createMockConfig() {
     port: 3847,
     tunnelProvider: 'none',
     captureMode: 'relay',
+    transportType: 'relay',
     relayUrl: 'wss://relay.example.com',
   };
   return {
@@ -356,7 +357,7 @@ describe('VsCodeServer', () => {
       it('logs that server is running (no UI message)', async () => {
         await (server as any).onServerStarted();
         expect(logger.info).toHaveBeenCalledWith(
-          expect.stringContaining('Mobile Copilot server running'),
+          expect.stringContaining('AgentDeck server running'),
         );
       });
 
@@ -403,7 +404,7 @@ describe('VsCodeServer', () => {
       it('shows information message', () => {
         (server as any).onServerStopped();
         expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
-          'Mobile Copilot server stopped.',
+          'AgentDeck server stopped.',
         );
       });
     });

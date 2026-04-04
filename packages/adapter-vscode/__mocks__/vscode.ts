@@ -181,6 +181,7 @@ class ThemeColor {
 }
 
 const env = {
+  machineId: 'test-machine-id-1234567890ab',
   clipboard: {
     writeText: jest.fn().mockResolvedValue(undefined),
     readText: jest.fn().mockResolvedValue(''),

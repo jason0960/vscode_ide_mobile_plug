@@ -508,7 +508,7 @@ describe('AgentOperations', () => {
 
     it('uses default terminal name when none provided', async () => {
       const result = await agent.runCommand({ command: 'echo test' });
-      expect(result.terminalName).toBe('Mobile Copilot');
+      expect(result.terminalName).toBe('AgentDeck');
     });
 
     it('uses custom terminal name when provided', async () => {

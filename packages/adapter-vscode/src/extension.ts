@@ -21,7 +21,7 @@ let server: VsCodeServer | undefined;
  * Only relevant when transportType is 'relay'. Pub/Sub ignores this.
  */
 function getRelayUrl(config: VsCodeConfig): string | undefined {
-  const transportType = config.get<string>('transportType', 'relay');
+  const transportType = config.get<string>('transportType', 'pubsub');
   if (transportType !== 'relay') return undefined; // Pub/Sub doesn't use relay URLs
 
   const externalUrl = config.get<string>('relayUrl', '');
@@ -81,7 +81,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
     vscode.commands.registerCommand('mobile-copilot.relayMenu', async () => {
-      const transportType = config.get<string>('transportType', 'relay');
+      const transportType = config.get<string>('transportType', 'pubsub');
       const isPubSub = transportType === 'pubsub';
       const transportLabel = isPubSub ? 'Pub/Sub' : 'Relay';
 
@@ -168,7 +168,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Connect transport (relay or Pub/Sub based on config)
         const relayUrl = getRelayUrl(config);
-        const transportType = config.get<string>('transportType', 'relay');
+        const transportType = config.get<string>('transportType', 'pubsub');
         try {
           const code = await server!.connectRelay(relayUrl);
           logger.info(`Auto-connected via ${transportType}. Pairing code: ${code}`);
@@ -178,12 +178,12 @@ export function activate(context: vscode.ExtensionContext) {
         }
       } catch (err: any) {
         logger.error(`Auto-start failed: ${err.message}`);
-        vscode.window.showErrorMessage(`Mobile Copilot auto-start failed: ${err.message}`);
+        vscode.window.showErrorMessage(`AgentDeck auto-start failed: ${err.message}`);
       }
     })();
   }
 
-  logger.info('Mobile Copilot extension activated');
+  logger.info('AgentDeck extension activated');
 }
 
 /**

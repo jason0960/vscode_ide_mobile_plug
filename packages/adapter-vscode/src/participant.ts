@@ -65,7 +65,7 @@ export function registerChatParticipant(
     const messages: vscode.LanguageModelChatMessage[] = [];
 
     const systemPrompt =
-      'You are a powerful coding assistant running inside VS Code via the Mobile Copilot extension. ' +
+      'You are a powerful coding assistant running inside VS Code via the AgentDeck extension. ' +
       'The user may be prompting from their mobile device. ' +
       'You have full awareness of the workspace — the file tree, open editors, diagnostics, and git status are provided below. ' +
       'Help with code, explain concepts, refactor, debug, and more. ' +

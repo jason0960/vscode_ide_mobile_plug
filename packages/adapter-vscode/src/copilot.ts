@@ -86,7 +86,7 @@ export class CopilotBridge {
         if (err.code === 'NoPermissions') {
           throw new Error(
             '⚠️ Authorization Required — VS Code is showing a permission dialog on your desktop. ' +
-            'Please go to your computer and click "Allow" to grant Mobile Copilot access to the language model. ' +
+            'Please go to your computer and click "Allow" to grant AgentDeck access to the language model. ' +
             'This only needs to be done once.'
           );
         }
@@ -116,7 +116,7 @@ export class CopilotBridge {
     const messages: vscode.LanguageModelChatMessage[] = [];
 
     let systemContent =
-      'You are a helpful coding assistant connected via Mobile Copilot. ' +
+      'You are a helpful coding assistant connected via AgentDeck. ' +
       'The user is prompting you from their mobile device and has full access to their VS Code workspace. ' +
       'You can help with code, answer questions, explain concepts, and assist with development tasks. ' +
       'Format responses with markdown. Use code blocks with language identifiers for code snippets.';

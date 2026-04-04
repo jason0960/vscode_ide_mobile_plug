@@ -45,7 +45,7 @@ export class VsCodeTunnel extends BaseTunnel {
       const msg = `VS Code tunnel failed: ${err.message}`;
       this.logger.error(`[Tunnel] ${msg}`);
       vscode.window.showWarningMessage(
-        `Mobile Copilot: ${msg}\n\nMake sure you're signed into GitHub and have "Remote - Tunnels" support.`
+        `AgentDeck: ${msg}\n\nMake sure you're signed into GitHub and have "Remote - Tunnels" support.`
       );
       throw new Error(msg);
     }
@@ -57,13 +57,13 @@ export class VsCodeTunnel extends BaseTunnel {
   async toggleTunnel(port: number): Promise<void> {
     if (this.isActive()) {
       await this.stopTunnel();
-      vscode.window.showInformationMessage('Mobile Copilot: Tunnel stopped');
+      vscode.window.showInformationMessage('AgentDeck: Tunnel stopped');
     } else {
       try {
         const url = await this.startTunnel(port);
-        vscode.window.showInformationMessage(`Mobile Copilot: Tunnel active at ${url}`);
+        vscode.window.showInformationMessage(`AgentDeck: Tunnel active at ${url}`);
       } catch (err: any) {
-        vscode.window.showErrorMessage(`Mobile Copilot: Failed to start tunnel — ${err.message}`);
+        vscode.window.showErrorMessage(`AgentDeck: Failed to start tunnel — ${err.message}`);
       }
     }
   }

@@ -1,12 +1,13 @@
-# Mobile Copilot Remote
+# AgentDeck — Command Center for GitHub Copilot
 
-> Control GitHub Copilot from your phone — the **real** agent with full file editing, terminal access, git operations, and streaming responses, via a native mobile app or browser PWA. **$0 additional cost.**
+> Control GitHub Copilot from your phone — the **real** agent with full file editing, terminal access, git operations, and streaming responses, via a native iOS app or browser PWA. **$0 additional cost.**
 
 <p align="center">
   <img src="https://img.shields.io/badge/VS%20Code-%3E%3D1.95.0-blue" alt="VS Code version" />
   <img src="https://img.shields.io/badge/GitHub%20Copilot-Required-green" alt="Copilot required" />
   <img src="https://img.shields.io/badge/License-MIT-yellow" alt="MIT License" />
   <img src="https://img.shields.io/badge/v0.2.0-stable-brightgreen" alt="v0.2.0" />
+  <img src="https://img.shields.io/badge/iOS-TestFlight-blue" alt="TestFlight" />
   <img src="https://img.shields.io/badge/tests-698%20passing-brightgreen" alt="698 tests" />
   <img src="https://img.shields.io/badge/coverage-76%25-green" alt="76% coverage" />
 </p>
@@ -15,7 +16,7 @@
 
 ## Why?
 
-You're on the couch, in bed, or on the bus — and you want to tell Copilot to refactor that module, fix the failing tests, or scaffold a new feature. Mobile Copilot gives you the **full VS Code Copilot Chat agent** on your phone. It edits files, runs commands, reads diagnostics, and streams everything back to you in real time. Your desktop does the work; your phone is the remote.
+You're on the couch, in bed, or on the bus — and you want to tell Copilot to refactor that module, fix the failing tests, or scaffold a new feature. AgentDeck gives you the **full VS Code Copilot Chat agent** on your phone. It edits files, runs commands, reads diagnostics, and streams everything back to you in real time. Your desktop does the work; your phone is the remote.
 
 ---
 
@@ -98,6 +99,20 @@ Live error/warning counts with badge. Tap any diagnostic to open the file at the
 
 ## Installation
 
+### VS Code Marketplace (recommended)
+
+Search for **AgentDeck Command Center** in the VS Code Extensions panel, or install from terminal:
+
+```bash
+code --install-extension jason0960.agentdeck
+```
+
+### iOS App (TestFlight)
+
+The native iOS app is available on **TestFlight**. Contact the repo owner for a TestFlight invite link.
+
+### Build from source
+
 ```bash
 # Clone and install
 git clone https://github.com/jason0960/vscode_ide_mobile_plug.git
@@ -114,6 +129,8 @@ code --install-extension mobile-copilot-0.2.0.vsix --force
 ```
 
 Reload VS Code: `Ctrl+Shift+P` → **Developer: Reload Window**
+
+> **Note:** The marketplace version is pre-built and ready to use — building from source is only needed for development.
 
 ---
 
@@ -157,7 +174,7 @@ The mobile app automatically detects whether a room code is a Pub/Sub pairing or
 
 ### Same Wi-Fi (browser PWA)
 
-1. `Ctrl+Shift+P` → **Mobile Copilot: Start Server**
+1. `Ctrl+Shift+P` → **AgentDeck: Start Server**
 2. Scan the QR code with your phone
 3. Start chatting
 
@@ -169,9 +186,9 @@ For the browser PWA from anywhere — different Wi-Fi, cellular, etc.
 
 1. Install **Remote - Tunnels** (`ms-vscode.remote-server`) extension
 2. Sign in with GitHub (Accounts icon, bottom-left)
-3. Start the Mobile Copilot server
+3. Start the AgentDeck server
 4. Open **Ports** tab → Forward port `3847` → Set visibility to **Public**
-5. `Ctrl+Shift+P` → **Mobile Copilot: Set Tunnel URL** → paste the forwarded URL
+5. `Ctrl+Shift+P` → **AgentDeck: Set Tunnel URL** → paste the forwarded URL
 6. Scan the new QR code
 
 #### Option B: Cloudflare Tunnel (free, no account)
@@ -199,11 +216,12 @@ Set `mobileCopilot.tunnelProvider` to `ngrok`, restart the server.
 
 | Command | Description |
 |---------|-------------|
-| **Mobile Copilot: Start Server** | Start the server and show QR code |
-| **Mobile Copilot: Stop Server** | Stop server and disconnect all clients |
-| **Mobile Copilot: Show QR Code** | Show the QR code again |
-| **Mobile Copilot: Toggle Tunnel** | Start/stop the configured tunnel |
-| **Mobile Copilot: Set Tunnel URL** | Manually set a tunnel URL |
+| **AgentDeck: Start Server** | Start the server and show QR code |
+| **AgentDeck: Stop Server** | Stop server and disconnect all clients |
+| **AgentDeck: Show QR Code** | Show the QR code again |
+| **AgentDeck: Toggle Tunnel** | Start/stop the configured tunnel |
+| **AgentDeck: Set Tunnel URL** | Manually set a tunnel URL |
+| **AgentDeck: Connect Cloud Relay** | Connect to relay server and get room code |
 
 ---
 
@@ -279,6 +297,7 @@ App.tsx ←── Pub/Sub ───→  server.ts     Express + WebSocket + RPC
 ## Security
 
 - **Your code never leaves your machine** — no cloud service stores your code; communication is direct LAN, tunnel, or via Google Cloud Pub/Sub (messages are ephemeral, not persisted)
+- **End-to-end encryption** — X25519 ECDH key exchange + XSalsa20-Poly1305 (via tweetnacl) encrypts all RPC messages; the relay server cannot read your data
 - **256-bit cryptographic tokens** — generated via `crypto.randomBytes`, stored in VS Code SecretStorage
 - **QR code pairing** — token embedded in QR, stripped from URL after pairing
 - **One-time pairing codes** — Pub/Sub pairing info is fetched once and deleted from the relay server (10-min TTL)
@@ -295,8 +314,13 @@ App.tsx ←── Pub/Sub ───→  server.ts     Express + WebSocket + RPC
 
 ## Platform Notes
 
-### iOS
-- Use **Safari** to add the app to your home screen (Share → Add to Home Screen)
+### iOS Native App (recommended)
+- Available on **TestFlight** — native React Native (Expo) app with full feature set
+- E2E encrypted communication via relay or Pub/Sub
+- No browser required — runs as a native app
+
+### iOS PWA (browser fallback)
+- Use **Safari** to add the web app to your home screen (Share → Add to Home Screen)
 - Push notifications require: HTTPS tunnel + Safari + home screen install + iOS 16.4+
 - Vibration is not supported (Apple limitation); audio beep plays instead
 
@@ -321,12 +345,12 @@ App.tsx ←── Pub/Sub ───→  server.ts     Express + WebSocket + RPC
 
 | Problem | Solution |
 |---------|----------|
-| QR code doesn't appear | Run `Mobile Copilot: Start Server` from Command Palette |
+| QR code doesn't appear | Run `AgentDeck: Start Server` from Command Palette |
 | Phone can't connect (LAN) | Verify same network. Try `http://<your-ip>:3847` manually |
 | Phone can't connect (tunnel) | Check Ports tab — is 3847 forwarded and Public? Use `Set Tunnel URL` |
 | "Authentication failed" | Session expired. Show QR Code and rescan |
 | No agent response | Verify Copilot is signed in and active |
-| Extension not loading | Run `Developer: Reload Window`. Check Output → "Mobile Copilot" for errors |
+| Extension not loading | Run `Developer: Reload Window`. Check Output → "AgentDeck" for errors |
 | Still seeing old UI | Clear browser cache or open in incognito. Service worker may need two reloads |
 
 ---
@@ -345,7 +369,7 @@ packages/
 
 # Separate repos:
 # gopilot-relay   — Standalone WebSocket relay hub (room-based, 6-char codes)
-# gopilot-mobile  — React Native Expo app (Zustand, WebSocket, RPC client)
+# gopilot-mobile  — React Native Expo app (iOS TestFlight, Zustand, WebSocket, E2E crypto)
 ```
 
 ### Install & Build
@@ -391,7 +415,7 @@ Or press **F5** in VS Code to launch the Extension Development Host.
 }
 ```
 
-Then: `Ctrl+Shift+P` → **Mobile Copilot: Connect Cloud Relay** → shows a 6-char room code.
+Then: `Ctrl+Shift+P` → **AgentDeck: Connect Cloud Relay** → shows a 6-char room code.
 
 #### 3. Mobile App (React Native / Expo)
 
@@ -485,7 +509,7 @@ npx @vscode/vsce package --no-dependencies --allow-missing-repository
 
 | Problem | Solution |
 |---------|----------|
-| Mobile stuck on "Connecting..." after entering code | Check VS Code Output → "Mobile Copilot" for relay errors. Verify `mobileCopilot.relayUrl` is set correctly. |
+| Mobile stuck on "Connecting..." after entering code | Check VS Code Output → "AgentDeck" for relay errors. Verify `mobileCopilot.relayUrl` is set correctly. |
 | "Room not found" (code 4004) | Room code expired or wrong. Get a fresh code from VS Code. |
 | Mobile connects but never authenticates | Extension must be running relay mode. Check that auth.success is being sent back (see console logs). |
 | Relay server won't start | Check port 4800 isn't in use: `ss -tlnp \| grep 4800` |
@@ -497,7 +521,7 @@ npx @vscode/vsce package --no-dependencies --allow-missing-repository
 
 ### Test Suite
 
-698 automated tests across 18 suites with 76% overall coverage.
+698 automated tests across all repos with 76% overall coverage.
 
 ```bash
 npm test                       # Run all tests
@@ -513,8 +537,8 @@ npm run test:watch             # Watch mode
 | **adapter-core** | 93.8% | 94.5% | Auth, base server, tunnel |
 | **adapter-vscode** | 66.6% | 67.0% | server.ts (75%), agent.ts (93%), copilot.ts (79%) |
 
-| **relay-server** | — | — | Tracked in `gopilot-relay` (58 tests) |
-| **mobile-app** | — | — | Tracked in `gopilot-mobile` (135 tests) |
+| **relay-server** | — | — | Tracked in [`gopilot-relay`](https://github.com/jason0960/gopilot-relay) (58 tests) |
+| **mobile-app** | — | — | Tracked in [`gopilot-mobile`](https://github.com/jason0960/gopilot-mobile) (135 tests) |
 
 > Total across all repos: **698 tests** (505 extension + 58 relay + 135 mobile).
 

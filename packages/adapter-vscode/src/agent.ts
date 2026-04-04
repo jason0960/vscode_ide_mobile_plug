@@ -181,7 +181,7 @@ export class AgentOperations {
   // ─── Terminal Operations ────────────────────────────────────────
 
   async runCommand(params: TerminalRunRequest): Promise<{ terminalName: string; sent: boolean; output?: string; exitCode?: number }> {
-    const name = params.terminalName || 'Mobile Copilot';
+    const name = params.terminalName || 'AgentDeck';
     const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
     this.validateCommand(params.command);

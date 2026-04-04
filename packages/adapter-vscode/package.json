@@ -2,7 +2,7 @@
   "name": "agentdeck",
   "displayName": "AgentDeck Command Center",
   "description": "Control VS Code Copilot Chat from your phone — full agent mode with file editing, terminal, git diffs, diagnostics, and streaming responses.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "jason0960",
   "license": "MIT",
   "icon": "icon.png",
@@ -49,47 +49,47 @@
     "commands": [
       {
         "command": "mobile-copilot.start",
-        "title": "Mobile Copilot: Start Server"
+        "title": "AgentDeck: Start Server"
       },
       {
         "command": "mobile-copilot.stop",
-        "title": "Mobile Copilot: Stop Server"
+        "title": "AgentDeck: Stop Server"
       },
       {
         "command": "mobile-copilot.showQR",
-        "title": "Mobile Copilot: Show QR Code"
+        "title": "AgentDeck: Show QR Code"
       },
       {
         "command": "mobile-copilot.toggleTunnel",
-        "title": "Mobile Copilot: Toggle Tunnel"
+        "title": "AgentDeck: Toggle Tunnel"
       },
       {
         "command": "mobile-copilot.setTunnelUrl",
-        "title": "Mobile Copilot: Set Tunnel URL"
+        "title": "AgentDeck: Set Tunnel URL"
       },
       {
         "command": "mobile-copilot.connectRelay",
-        "title": "Mobile Copilot: Connect Cloud Relay"
+        "title": "AgentDeck: Connect Cloud Relay"
       },
       {
         "command": "mobile-copilot.disconnectRelay",
-        "title": "Mobile Copilot: Disconnect Cloud Relay"
+        "title": "AgentDeck: Disconnect Cloud Relay"
       },
       {
         "command": "mobile-copilot.showExpoQR",
-        "title": "Mobile Copilot: Show Expo Go QR Code"
+        "title": "AgentDeck: Show Expo Go QR Code"
       },
       {
         "command": "mobile-copilot.changeRoom",
-        "title": "Mobile Copilot: Change Relay Room"
+        "title": "AgentDeck: Change Relay Room"
       },
       {
         "command": "mobile-copilot.relayMenu",
-        "title": "Mobile Copilot: Relay Options"
+        "title": "AgentDeck: Relay Options"
       },
       {
         "command": "mobile-copilot.showPairingInfo",
-        "title": "Mobile Copilot: Show Pub/Sub Pairing QR"
+        "title": "AgentDeck: Show Pub/Sub Pairing QR"
       }
     ],
     "configuration": {
@@ -137,8 +137,8 @@
             "relay",
             "pubsub"
           ],
-          "default": "relay",
-          "markdownDescription": "Transport layer for mobile ↔ extension communication.\n- **relay**: WebSocket relay hub (requires `relayUrl`).\n- **pubsub**: Google Cloud Pub/Sub (serverless, requires `pubsub.projectId`)."
+          "default": "pubsub",
+          "markdownDescription": "Transport layer for mobile ↔ extension communication.\n- **pubsub**: Google Cloud Pub/Sub (serverless, default).\n- **relay**: WebSocket relay hub (requires `relayUrl`)."
         },
         "mobileCopilot.pubsub.projectId": {
           "type": "string",
