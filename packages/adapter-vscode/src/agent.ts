@@ -1,9 +1,5 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as os from 'os';
-import * as fs from 'fs';
-import * as crypto from 'crypto';
-import { execFileSync } from 'child_process';
 import { ContextProvider } from './context';
 import type {
   FileReadRequest,
@@ -12,11 +8,6 @@ import type {
   SearchRequest,
   TerminalRunRequest,
 } from '@mobile-copilot/protocol';
-
-/** Max files per git restore/revert operation to prevent event-loop blocking */
-const MAX_FILES_PER_OPERATION = 100;
-/** Max diff size (5 MB) to prevent memory exhaustion */
-const MAX_DIFF_SIZE = 5 * 1024 * 1024;
 
 /**
  * Agent operations — full IDE control from mobile.
@@ -278,167 +269,6 @@ export class AgentOperations {
 
   async getGitStatus() {
     return this.contextProvider.getGitStatus();
-  }
-
-  /**
-   * Restore (discard) working-tree changes for the given files.
-   * Untracked files (`??`) are deleted; tracked files are `git restore`d.
-   * Every path is validated through `resolveWorkspacePath` before use.
-   */
-  async gitRestoreFiles(files: string[]): Promise<{ restored: number; files: string[]; message?: string }> {
-    if (!files || files.length === 0) {
-      return { restored: 0, files: [], message: 'No files specified' };
-    }
-    if (files.length > MAX_FILES_PER_OPERATION) {
-      throw new Error(`Too many files (${files.length}). Maximum is ${MAX_FILES_PER_OPERATION}`);
-    }
-
-    const wsFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!wsFolder) throw new Error('No workspace folder open');
-    const wsRoot = wsFolder.uri.fsPath;
-
-    const results: string[] = [];
-    for (const filePath of files) {
-      // Validate every path through the battle-tested resolver
-      this.resolveWorkspacePath(filePath);
-
-      try {
-        const status = execFileSync('git', ['status', '--porcelain', '--', filePath], {
-          cwd: wsRoot, encoding: 'utf-8',
-        }).trim();
-
-        if (status.startsWith('??')) {
-          // Untracked → delete.  Use the resolved absolute path.
-          const absPath = this.resolveWorkspacePath(filePath);
-          fs.unlinkSync(absPath);
-        } else {
-          execFileSync('git', ['restore', '--', filePath], { cwd: wsRoot });
-          try { execFileSync('git', ['restore', '--staged', '--', filePath], { cwd: wsRoot }); } catch { /* ignore */ }
-        }
-        results.push(filePath);
-      } catch (err: any) {
-        this.outputChannel.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
-      }
-    }
-    return { restored: results.length, files: results };
-  }
-
-  /**
-   * Selectively revert specific diff hunks from a file.
-   * The filePath is validated; diff headers are regenerated from the
-   * validated path (never trusting user-supplied headers) to prevent
-   * targeting files outside the workspace.
-   */
-  async gitRevertHunks(
-    filePath: string,
-    hunkIndices: number[],
-    diff: string,
-  ): Promise<{ success: boolean; reverted?: number; message?: string }> {
-    if (!filePath || !hunkIndices?.length || !diff) {
-      return { success: false, message: 'Missing required parameters (filePath, hunkIndices, diff)' };
-    }
-
-    // --- Input validation ---
-    if (filePath.includes('\n') || filePath.includes('\r')) {
-      throw new Error('Invalid filePath: contains newline characters');
-    }
-    if (diff.length > MAX_DIFF_SIZE) {
-      throw new Error(`Diff too large (${diff.length} bytes). Maximum is ${MAX_DIFF_SIZE}`);
-    }
-
-    // Path-traversal check through the tested resolver
-    this.resolveWorkspacePath(filePath);
-
-    const wsFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!wsFolder) throw new Error('No workspace folder open');
-    const wsRoot = wsFolder.uri.fsPath;
-
-    // Parse the unified diff into header lines + individual hunks
-    const lines = diff.split('\n');
-    const hunks: { header: string; lines: string[] }[] = [];
-    let currentHunk: { header: string; lines: string[] } | null = null;
-
-    for (const line of lines) {
-      if (line.startsWith('@@')) {
-        if (currentHunk) hunks.push(currentHunk);
-        currentHunk = { header: line, lines: [] };
-      } else if (currentHunk) {
-        currentHunk.lines.push(line);
-      }
-      // Intentionally skip all header lines from user input
-    }
-    if (currentHunk) hunks.push(currentHunk);
-
-    // Always regenerate headers from the VALIDATED path — never trust user input
-    const headerLines = [
-      `diff --git a/${filePath} b/${filePath}`,
-      `--- a/${filePath}`,
-      `+++ b/${filePath}`,
-    ];
-
-    // Build a patch containing only the selected hunks
-    const patchLines = [...headerLines];
-    for (const idx of hunkIndices) {
-      if (idx >= 0 && idx < hunks.length) {
-        patchLines.push(hunks[idx].header);
-        patchLines.push(...hunks[idx].lines);
-      }
-    }
-
-    const tmpFile = path.join(
-      os.tmpdir(),
-      `mobile-copilot-revert-${crypto.randomBytes(8).toString('hex')}.patch`,
-    );
-    fs.writeFileSync(tmpFile, patchLines.join('\n') + '\n');
-
-    try {
-      execFileSync('git', ['apply', '--reverse', tmpFile], {
-        cwd: wsRoot, encoding: 'utf-8',
-      });
-      return { success: true, reverted: hunkIndices.length };
-    } catch {
-      // Fallback: try with --3way for better conflict handling
-      try {
-        execFileSync('git', ['apply', '--reverse', '--3way', tmpFile], {
-          cwd: wsRoot, encoding: 'utf-8',
-        });
-        return { success: true, reverted: hunkIndices.length };
-      } catch (err2: any) {
-        this.outputChannel.warn(`[Git] revertHunks failed for ${filePath}: ${err2.message}`);
-        return { success: false, message: 'Failed to apply reverse patch' };
-      }
-    } finally {
-      try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-    }
-  }
-
-  /**
-   * Restore (discard) working-tree changes — typically agent-modified files.
-   * Every path is validated through `resolveWorkspacePath`.
-   */
-  async gitRestoreChanges(files: string[]): Promise<{ restored: number; files: string[] }> {
-    if (!files || files.length === 0) {
-      return { restored: 0, files: [] };
-    }
-    if (files.length > MAX_FILES_PER_OPERATION) {
-      throw new Error(`Too many files (${files.length}). Maximum is ${MAX_FILES_PER_OPERATION}`);
-    }
-
-    const wsFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!wsFolder) throw new Error('No workspace folder open');
-    const wsRoot = wsFolder.uri.fsPath;
-
-    const results: string[] = [];
-    for (const filePath of files) {
-      this.resolveWorkspacePath(filePath);
-      try {
-        execFileSync('git', ['restore', '--', filePath], { cwd: wsRoot });
-        results.push(filePath);
-      } catch (err: any) {
-        this.outputChannel.warn(`[Git] Failed to restore ${filePath}: ${err.message}`);
-      }
-    }
-    return { restored: results.length, files: results };
   }
 
   async gitDiff(): Promise<string | null> {

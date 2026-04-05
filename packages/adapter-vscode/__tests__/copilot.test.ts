@@ -133,34 +133,4 @@ describe('CopilotBridge', () => {
       expect(count).toBe(42);
     });
   });
-
-  // ─── resetModel ───────────────────────────────────────────────
-
-  describe('resetModel', () => {
-    it('clears cached model', async () => {
-      await bridge.selectModel();
-      bridge.resetModel();
-      // Clear call count, then re-select
-      vscode.lm.selectChatModels.mockClear();
-      await bridge.selectModel();
-      expect(vscode.lm.selectChatModels).toHaveBeenCalled();
-    });
-  });
-
-  // ─── sendToChat ───────────────────────────────────────────────
-
-  describe('sendToChat', () => {
-    it('returns success when command executes', async () => {
-      vscode.commands.executeCommand.mockResolvedValue(undefined);
-      const result = await bridge.sendToChat('hello');
-      expect(result.sent).toBe(true);
-    });
-
-    it('returns error when command fails', async () => {
-      vscode.commands.executeCommand.mockRejectedValue(new Error('No chat'));
-      const result = await bridge.sendToChat('hello');
-      expect(result.sent).toBe(false);
-      expect(result.error).toBe('No chat');
-    });
-  });
 });

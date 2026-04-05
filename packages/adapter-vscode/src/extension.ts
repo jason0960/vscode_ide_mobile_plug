@@ -256,14 +256,14 @@ async function showPubSubPairingQR(pairing: PubSubPairingInfo): Promise<void> {
 </head>
 <body>
   <h2>🔗 Pub/Sub Pairing</h2>
-  <p>Scan this QR code with the GoPilot mobile app</p>
+  <p>Scan this QR code with the AgentDeck mobile app</p>
   <img src="${qrDataUri}" width="320" height="320" />
   <p class="field">Project: ${pairing.projectId}</p>
   <p class="field">Topic: ${pairing.topicName}</p>
   <p class="field">User: ${pairing.userId}</p>
   <p class="token-info">Token expires at ${expiresAt}</p>
   <ol class="steps">
-    <li>Open <strong>GoPilot</strong> on your phone</li>
+    <li>Open <strong>AgentDeck</strong> on your phone</li>
     <li>Tap <strong>Connect via Pub/Sub</strong></li>
     <li>Scan this QR code</li>
   </ol>

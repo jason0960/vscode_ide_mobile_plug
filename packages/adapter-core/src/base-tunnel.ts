@@ -1,5 +1,5 @@
 import { ChildProcess, spawn } from 'child_process';
-import type { ILogger, IConfigProvider } from './interfaces';
+import type { ILogger } from './interfaces';
 
 /**
  * Portable tunnel management — Cloudflare and ngrok tunnels.

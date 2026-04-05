@@ -15,10 +15,6 @@ import { ChatResponseInterceptor } from './interceptor';
 import { RelayClient } from './relay-client';
 import { PubSubTransport } from './pubsub-transport';
 import type { MobileTransport, TransportType } from './transport';
-import {
-  setMobileCallbacks,
-  setCurrentMobileRequestId,
-} from './participant';
 
 /**
  * VS Code implementation of the AgentDeck server.
@@ -1103,25 +1099,25 @@ export class VsCodeServer extends BaseServer {
   private updateStatusBar(state: 'stopped' | 'running' | 'connected' | 'tunnel' | 'relay'): void {
     switch (state) {
       case 'stopped':
-        this.statusBarItem.text = '$(device-mobile) Mobile: Off';
+        this.statusBarItem.text = '$(device-mobile) AgentDeck: Off';
         this.statusBarItem.tooltip = 'Click to start AgentDeck';
         this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = undefined;
         break;
       case 'running':
-        this.statusBarItem.text = '$(broadcast) Mobile: LAN';
+        this.statusBarItem.text = '$(broadcast) AgentDeck: LAN';
         this.statusBarItem.tooltip = `AgentDeck on port ${this.port}\nClick to show QR code`;
         this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = undefined;
         break;
       case 'connected':
-        this.statusBarItem.text = `$(broadcast) Mobile: ${this.clients.size} connected`;
+        this.statusBarItem.text = `$(broadcast) AgentDeck: ${this.clients.size} connected`;
         this.statusBarItem.tooltip = `${this.clients.size} device(s) connected\nClick to show QR code`;
         this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.prominentBackground');
         break;
       case 'tunnel':
-        this.statusBarItem.text = '$(globe) Mobile: Tunnel';
+        this.statusBarItem.text = '$(globe) AgentDeck: Tunnel';
         this.statusBarItem.tooltip = `Tunnel active: ${this.tunnel.getTunnelUrl()}\nClick to show QR code`;
         this.statusBarItem.command = 'mobile-copilot.showQR';
         this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
@@ -1129,7 +1125,7 @@ export class VsCodeServer extends BaseServer {
       case 'relay':
         const code = this.transport.code || '...';
         const count = this.relayClientCount;
-        this.statusBarItem.text = `$(cloud) Mobile: Relay [${code}]`;
+        this.statusBarItem.text = `$(cloud) AgentDeck: Relay [${code}]`;
         this.statusBarItem.tooltip = `Pairing code: ${code}\n${count} device(s) connected\nClick for options`;
         this.statusBarItem.command = 'mobile-copilot.relayMenu';
         this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.prominentBackground');

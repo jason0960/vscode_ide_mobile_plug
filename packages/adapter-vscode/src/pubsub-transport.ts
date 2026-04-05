@@ -1,5 +1,5 @@
 /**
- * Google Cloud Pub/Sub transport for Mobile Copilot (extension side).
+ * Google Cloud Pub/Sub transport for AgentDeck (extension side).
  *
  * Drop-in replacement for RelayClient — exposes the same event interface
  * (`onMessage`, `onRoomCreated`, `onDisconnected`, `onClientJoined`,

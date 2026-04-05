@@ -3,8 +3,6 @@ import type {
   DiagnosticInfo,
   GitStatusInfo,
   ContextAttachment,
-  Session,
-  ServerState,
 } from '@mobile-copilot/protocol';
 
 // ─── ILogger ──────────────────────────────────────────────────────

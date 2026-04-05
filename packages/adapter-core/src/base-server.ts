@@ -1,7 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
-import * as path from 'path';
 import * as os from 'os';
 import { RpcHandler } from '@mobile-copilot/protocol';
 import type { ServerState } from '@mobile-copilot/protocol';

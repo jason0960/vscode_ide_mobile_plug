@@ -75,9 +75,6 @@ const mockAgent = {
   getDiagnosticsSummary: jest.fn().mockReturnValue({ errors: 0, warnings: 0 }),
   getGitStatus: jest.fn().mockResolvedValue({ branch: 'main', clean: true }),
   gitDiff: jest.fn().mockResolvedValue({ diff: '' }),
-  gitRestoreFiles: jest.fn().mockResolvedValue({ restored: 1, files: ['file.ts'] }),
-  gitRevertHunks: jest.fn().mockResolvedValue({ reverted: true }),
-  gitRestoreChanges: jest.fn().mockResolvedValue({ restored: 2, files: ['a.ts', 'b.ts'] }),
   dispose: jest.fn(),
 };
 
@@ -132,10 +129,6 @@ jest.mock('../src/pubsub-transport', () => ({
 jest.mock('../src/participant', () => ({
   setMobileCallbacks: jest.fn(),
   setCurrentMobileRequestId: jest.fn(),
-}));
-
-jest.mock('../src/stream-utils', () => ({
-  findSafeBreak: jest.fn((text: string) => text.length),
 }));
 
 // ─── Import under test ──────────────────────────────────────────
@@ -278,7 +271,7 @@ describe('VsCodeServer', () => {
 
     it('sets initial status bar to stopped', () => {
       const statusBarItem = vscode.window.createStatusBarItem.mock.results[0].value;
-      expect(statusBarItem.text).toBe('$(device-mobile) Mobile: Off');
+      expect(statusBarItem.text).toBe('$(device-mobile) AgentDeck: Off');
     });
 
     it('sets status bar command to showQR', () => {
@@ -398,7 +391,7 @@ describe('VsCodeServer', () => {
       it('updates status bar to stopped', () => {
         (server as any).onServerStopped();
         const statusBarItem = vscode.window.createStatusBarItem.mock.results[0].value;
-        expect(statusBarItem.text).toBe('$(device-mobile) Mobile: Off');
+        expect(statusBarItem.text).toBe('$(device-mobile) AgentDeck: Off');
       });
 
       it('shows information message', () => {
@@ -430,7 +423,7 @@ describe('VsCodeServer', () => {
         (server as any).clients.clear();
         (server as any).onClientDisconnected({} as any, 'session-1');
         const statusBarItem = vscode.window.createStatusBarItem.mock.results[0].value;
-        expect(statusBarItem.text).toBe('$(broadcast) Mobile: LAN');
+        expect(statusBarItem.text).toBe('$(broadcast) AgentDeck: LAN');
       });
     });
   });
@@ -486,7 +479,7 @@ describe('VsCodeServer', () => {
         tunnel.isActive.mockReturnValue(false);
         await server.toggleTunnel();
         const statusBarItem = vscode.window.createStatusBarItem.mock.results[0].value;
-        expect(statusBarItem.text).toBe('$(broadcast) Mobile: LAN');
+        expect(statusBarItem.text).toBe('$(broadcast) AgentDeck: LAN');
       });
 
       it('shows QR when tunnel is active', async () => {
@@ -1142,14 +1135,14 @@ describe('VsCodeServer', () => {
 
     it('stopped state', () => {
       (server as any).updateStatusBar('stopped');
-      expect(statusBarItem.text).toBe('$(device-mobile) Mobile: Off');
+      expect(statusBarItem.text).toBe('$(device-mobile) AgentDeck: Off');
       expect(statusBarItem.tooltip).toContain('Click to start');
       expect(statusBarItem.backgroundColor).toBeUndefined();
     });
 
     it('running state', () => {
       (server as any).updateStatusBar('running');
-      expect(statusBarItem.text).toBe('$(broadcast) Mobile: LAN');
+      expect(statusBarItem.text).toBe('$(broadcast) AgentDeck: LAN');
       expect(statusBarItem.tooltip).toContain('port');
       expect(statusBarItem.backgroundColor).toBeUndefined();
     });
@@ -1158,14 +1151,14 @@ describe('VsCodeServer', () => {
       (server as any).clients.set({} as any, { authenticated: true });
       (server as any).clients.set({} as any, { authenticated: true });
       (server as any).updateStatusBar('connected');
-      expect(statusBarItem.text).toBe('$(broadcast) Mobile: 2 connected');
+      expect(statusBarItem.text).toBe('$(broadcast) AgentDeck: 2 connected');
       expect(statusBarItem.tooltip).toContain('2 device(s)');
     });
 
     it('tunnel state', () => {
       tunnel.getTunnelUrl.mockReturnValue('https://tunnel.example.com');
       (server as any).updateStatusBar('tunnel');
-      expect(statusBarItem.text).toBe('$(globe) Mobile: Tunnel');
+      expect(statusBarItem.text).toBe('$(globe) AgentDeck: Tunnel');
       expect(statusBarItem.tooltip).toContain('tunnel.example.com');
     });
 
@@ -1173,7 +1166,7 @@ describe('VsCodeServer', () => {
       mockRelay.code = 'XYZ789';
       (server as any).relayClientCount = 2;
       (server as any).updateStatusBar('relay');
-      expect(statusBarItem.text).toBe('$(cloud) Mobile: Relay [XYZ789]');
+      expect(statusBarItem.text).toBe('$(cloud) AgentDeck: Relay [XYZ789]');
       expect(statusBarItem.tooltip).toContain('XYZ789');
       expect(statusBarItem.tooltip).toContain('2 device(s)');
     });

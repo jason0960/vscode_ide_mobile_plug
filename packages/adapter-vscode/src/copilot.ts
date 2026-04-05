@@ -147,27 +147,4 @@ export class CopilotBridge {
     const model = await this.getModel();
     return model.countTokens(text);
   }
-
-  resetModel(): void {
-    this.model = null;
-  }
-
-  async sendToChat(prompt: string): Promise<{ sent: boolean; error?: string }> {
-    try {
-      await vscode.commands.executeCommand('workbench.action.chat.open', {
-        query: prompt,
-        isPartialQuery: false,
-      });
-
-      this.outputChannel.info(`[Passthrough] Sent to Copilot Chat: ${prompt.substring(0, 100)}...`);
-      return { sent: true };
-    } catch (err: any) {
-      this.outputChannel.error(`[Passthrough] Failed to send to Copilot Chat: ${err.message}`);
-      return { sent: false, error: err.message };
-    }
-  }
-
-  async sendToChatAgent(prompt: string): Promise<{ sent: boolean; error?: string }> {
-    return this.sendToChat(prompt);
-  }
 }

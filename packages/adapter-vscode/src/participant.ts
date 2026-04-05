@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import type { ChatMessage, ContextAttachment } from '@mobile-copilot/protocol';
 import { ContextProvider } from './context';
 
 /**
