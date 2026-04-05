@@ -223,7 +223,7 @@ describe('Extension activation', () => {
           expect.objectContaining({ id: 'pairing-copy' }),
           expect.objectContaining({ id: 'disconnect' }),
         ]),
-        expect.objectContaining({ placeHolder: 'Pub/Sub Session' }),
+        expect.objectContaining({ placeHolder: 'Cloud Session' }),
       );
     });
 
@@ -259,7 +259,7 @@ describe('Extension activation', () => {
         JSON.stringify(fakePairing, null, 2),
       );
       expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
-        'Pub/Sub pairing JSON copied to clipboard.',
+        'Pairing JSON copied to clipboard.',
       );
     });
 
@@ -271,7 +271,7 @@ describe('Extension activation', () => {
       const handler = getCommandHandler('mobile-copilot.relayMenu');
       await handler();
       expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
-        'Pairing info not available — is Pub/Sub transport active?',
+        'Pairing info not available — is cloud transport active?',
       );
     });
 
@@ -319,7 +319,7 @@ describe('Extension activation', () => {
       const handler = getCommandHandler('mobile-copilot.showPairingInfo');
       await handler();
       expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
-        'Pairing info is only available in Pub/Sub transport mode.',
+        'Pairing info is not available in Relay transport mode.',
       );
     });
 
@@ -339,7 +339,7 @@ describe('Extension activation', () => {
       await handler();
       expect(vscode.window.createWebviewPanel).toHaveBeenCalledWith(
         'mobileCopilotPairingQR',
-        'Pub/Sub Pairing — Scan to Connect',
+        'AgentDeck — Scan to Connect',
         expect.anything(),
         expect.any(Object),
       );

@@ -89,7 +89,7 @@
       },
       {
         "command": "mobile-copilot.showPairingInfo",
-        "title": "AgentDeck: Show Pub/Sub Pairing QR"
+        "title": "AgentDeck: Show Pairing QR"
       }
     ],
     "configuration": {
@@ -138,32 +138,32 @@
             "pubsub"
           ],
           "default": "pubsub",
-          "markdownDescription": "Transport layer for mobile ↔ extension communication.\n- **pubsub**: Google Cloud Pub/Sub (serverless, default).\n- **relay**: WebSocket relay hub (requires `relayUrl`)."
+          "markdownDescription": "Transport layer for mobile ↔ extension communication.\n- **pubsub**: Cloud transport (serverless, default).\n- **relay**: WebSocket relay hub (requires `relayUrl`)."
         },
         "mobileCopilot.pubsub.projectId": {
           "type": "string",
           "default": "project-004bd74a-29f1-45a3-a14",
-          "markdownDescription": "Google Cloud project ID for Pub/Sub transport. Required when `transportType` is `pubsub`."
+          "markdownDescription": "Google Cloud project ID for cloud transport. Required when `transportType` is `pubsub`."
         },
         "mobileCopilot.pubsub.topicName": {
           "type": "string",
           "default": "GoPilot",
-          "markdownDescription": "Pub/Sub topic name. The topic must exist in the configured project."
+          "markdownDescription": "Cloud transport topic name. The topic must exist in the configured project."
         },
         "mobileCopilot.pubsub.subscriptionName": {
           "type": "string",
           "default": "GoPilot-extension-sub",
-          "markdownDescription": "Pub/Sub subscription name for the extension to pull from (mobile → extension messages)."
+          "markdownDescription": "Cloud transport subscription name for the extension to pull from (mobile → extension messages)."
         },
         "mobileCopilot.pubsub.mobileSubscriptionName": {
           "type": "string",
           "default": "GoPilot-mobile-sub",
-          "markdownDescription": "Pub/Sub subscription name for the mobile app to pull from (extension → mobile messages). Included in pairing info."
+          "markdownDescription": "Cloud transport subscription name for the mobile app to pull from (extension → mobile messages). Included in pairing info."
         },
         "mobileCopilot.pairingRelayUrl": {
           "type": "string",
           "default": "https://gopilot-relay.onrender.com",
-          "markdownDescription": "HTTP URL of the relay server used for the pairing code exchange. The extension POSTs Pub/Sub pairing info here and gets back a short room code that the mobile app can fetch."
+          "markdownDescription": "HTTP URL of the relay server used for the pairing code exchange. The extension POSTs pairing info here and gets back a short room code that the mobile app can fetch."
         },
         "mobileCopilot.captureMode": {
           "type": "string",

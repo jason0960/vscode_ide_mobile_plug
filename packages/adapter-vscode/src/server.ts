@@ -168,7 +168,7 @@ export class VsCodeServer extends BaseServer {
 
       if (!projectId) {
         throw new Error(
-          'Pub/Sub transport requires mobileCopilot.pubsub.projectId to be set.',
+          'Cloud transport requires mobileCopilot.pubsub.projectId to be set.',
         );
       }
 

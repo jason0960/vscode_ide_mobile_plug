@@ -83,16 +83,16 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('mobile-copilot.relayMenu', async () => {
       const transportType = config.get<string>('transportType', 'pubsub');
       const isPubSub = transportType === 'pubsub';
-      const transportLabel = isPubSub ? 'Pub/Sub' : 'Relay';
+      const transportLabel = isPubSub ? 'Cloud' : 'Relay';
 
       if (isPubSub) {
-        // Pub/Sub mode — show pairing-centric menu
+        // Cloud mode — show pairing-centric menu
         const choice = await vscode.window.showQuickPick(
           [
             { label: '$(key) Show Pairing QR', description: 'Generate QR code for mobile to scan', id: 'pairing-qr' },
             { label: '$(clippy) Copy Pairing JSON', description: 'Copy pairing info to clipboard', id: 'pairing-copy' },
             { label: '$(refresh) Refresh Token', description: 'Regenerate pairing with fresh token', id: 'refresh' },
-            { label: '$(debug-disconnect) Disconnect', description: 'Stop Pub/Sub transport', id: 'disconnect' },
+            { label: '$(debug-disconnect) Disconnect', description: 'Stop transport', id: 'disconnect' },
           ] as (vscode.QuickPickItem & { id: string })[],
           { placeHolder: `${transportLabel} Session` },
         );
@@ -145,7 +145,7 @@ export function activate(context: vscode.ExtensionContext) {
       try {
         const pairing = await server!.getPairingInfo();
         if (!pairing) {
-          vscode.window.showWarningMessage('Pairing info is only available in Pub/Sub transport mode.');
+          vscode.window.showWarningMessage('Pairing info is not available in Relay transport mode.');
           return;
         }
         await showPubSubPairingQR(pairing);
@@ -203,21 +203,21 @@ function getLocalIp(): string {
 }
 
 /**
- * Copy Pub/Sub pairing info as JSON to the clipboard.
+ * Copy pairing info as JSON to the clipboard.
  */
 async function copyPubSubPairing(srv: VsCodeServer): Promise<void> {
   const pairing = await srv.getPairingInfo();
   if (!pairing) {
-    vscode.window.showWarningMessage('Pairing info not available — is Pub/Sub transport active?');
+    vscode.window.showWarningMessage('Pairing info not available — is cloud transport active?');
     return;
   }
   const json = JSON.stringify(pairing, null, 2);
   await vscode.env.clipboard.writeText(json);
-  vscode.window.showInformationMessage('Pub/Sub pairing JSON copied to clipboard.');
+  vscode.window.showInformationMessage('Pairing JSON copied to clipboard.');
 }
 
 /**
- * Show a webview panel with a QR code encoding the Pub/Sub pairing info.
+ * Show a webview panel with a QR code encoding the pairing info.
  * The QR contains a JSON payload the mobile app can decode to auto-connect.
  */
 async function showPubSubPairingQR(pairing: PubSubPairingInfo): Promise<void> {
@@ -235,7 +235,7 @@ async function showPubSubPairingQR(pairing: PubSubPairingInfo): Promise<void> {
 
   const panel = vscode.window.createWebviewPanel(
     'mobileCopilotPairingQR',
-    'Pub/Sub Pairing — Scan to Connect',
+    'AgentDeck — Scan to Connect',
     vscode.ViewColumn.Beside,
     { enableScripts: false },
   );
@@ -255,7 +255,7 @@ async function showPubSubPairingQR(pairing: PubSubPairingInfo): Promise<void> {
   </style>
 </head>
 <body>
-  <h2>🔗 Pub/Sub Pairing</h2>
+  <h2>🔗 AgentDeck Pairing</h2>
   <p>Scan this QR code with the AgentDeck mobile app</p>
   <img src="${qrDataUri}" width="320" height="320" />
   <p class="field">Project: ${pairing.projectId}</p>
@@ -264,7 +264,7 @@ async function showPubSubPairingQR(pairing: PubSubPairingInfo): Promise<void> {
   <p class="token-info">Token expires at ${expiresAt}</p>
   <ol class="steps">
     <li>Open <strong>AgentDeck</strong> on your phone</li>
-    <li>Tap <strong>Connect via Pub/Sub</strong></li>
+    <li>Tap <strong>Scan QR Code</strong></li>
     <li>Scan this QR code</li>
   </ol>
 </body>
